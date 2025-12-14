@@ -84,7 +84,7 @@ jobs:
         id: docker_meta
         uses: docker/metadata-action@v5.7.0
         with:
-          images: ghcr.io/anyfavors/kfox # list of Docker images to use as base name for tags
+          images: ghcr.io/anyfavors/protect-transcription # list of Docker images to use as base name for tags
           tags: |
             type=semver,enable=true,priority=900,pattern={{version}},value=${{ steps.semantic_version.outputs.version }}
             
