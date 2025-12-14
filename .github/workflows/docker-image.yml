@@ -33,12 +33,12 @@ jobs:
         
       - name: Build an canary image from Dockerfile #for trivy checks before doing a crossbuild.
         run: |
-          docker build --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64 -t docker.io/anyfavors/kfox:${{ github.sha }} .
+          docker build --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64 -t docker.io/anyfavors/protect-transcription:${{ github.sha }} .
           
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: 'docker.io/anyfavors/kfox:${{ github.sha }}'
+          image-ref: 'docker.io/anyfavors/protect-transcription:${{ github.sha }}'
           format: 'template'
           template: '@/contrib/sarif.tpl'
           output: 'trivy-results.sarif'
