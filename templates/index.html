@@ -1,0 +1,411 @@
+
+<!DOCTYPE html>
+<html lang="da">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Protect Transcribe - Speech Transcriptions</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        [x-cloak] { display: none !important; }
+        .audio-player { max-width: 300px; }
+        .status-completed { color: #10b981; }
+        .status-processing { color: #f59e0b; }
+        .status-error { color: #ef4444; }
+        .status-pending { color: #6b7280; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div x-data="transcribeApp()" x-init="init()" class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <header class="mb-8">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h1 class="text-3xl font-bold text-gray-800">
+                        <i class="fas fa-microphone-alt text-blue-600 mr-2"></i>
+                        Protect Transcribe
+                    </h1>
+                    <p class="text-gray-600 mt-1">Speech transcriptions from UniFi Protect cameras</p>
+                </div>
+                <div class="text-right">
+                    <button @click="refresh()" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition">
+                        <i class="fas fa-sync-alt mr-2" :class="{'animate-spin': loading}"></i>
+                        Refresh
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Stats Cards -->
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="text-2xl font-bold text-blue-600" x-text="stats.total">0</div>
+                <div class="text-gray-500 text-sm">Total</div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="text-2xl font-bold text-green-600" x-text="stats.completed">0</div>
+                <div class="text-gray-500 text-sm">Completed</div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="text-2xl font-bold text-yellow-600" x-text="stats.processing">0</div>
+                <div class="text-gray-500 text-sm">Processing</div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="text-2xl font-bold text-red-600" x-text="stats.errors">0</div>
+                <div class="text-gray-500 text-sm">Errors</div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-4">
+                <div class="text-2xl font-bold text-purple-600" x-text="stats.today">0</div>
+                <div class="text-gray-500 text-sm">Today</div>
+            </div>
+        </div>
+
+        <!-- Filters -->
+        <div class="bg-white rounded-lg shadow p-4 mb-6">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <!-- Search -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Search</label>
+                    <div class="relative">
+                        <input 
+                            type="text" 
+                            x-model="filters.search"
+                            @input.debounce.300ms="loadTranscriptions()"
+                            placeholder="Search transcriptions..."
+                            class="w-full pl-10 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        >
+                        <i class="fas fa-search absolute left-3 top-3 text-gray-400"></i>
+                    </div>
+                </div>
+                
+                <!-- Camera filter -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Camera</label>
+                    <select 
+                        x-model="filters.camera"
+                        @change="loadTranscriptions()"
+                        class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    >
+                        <option value="">All Cameras</option>
+                        <template x-for="camera in cameras" :key="camera">
+                            <option :value="camera" x-text="camera"></option>
+                        </template>
+                    </select>
+                </div>
+                
+                <!-- Date filter -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                    <select 
+                        x-model="filters.date"
+                        @change="loadTranscriptions()"
+                        class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    >
+                        <option value="">All Dates</option>
+                        <template x-for="date in dates" :key="date">
+                            <option :value="date" x-text="formatDate(date)"></option>
+                        </template>
+                    </select>
+                </div>
+                
+                <!-- Status filter -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Status</label>
+                    <select 
+                        x-model="filters.status"
+                        @change="loadTranscriptions()"
+                        class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    >
+                        <option value="">All Statuses</option>
+                        <option value="completed">Completed</option>
+                        <option value="processing">Processing</option>
+                        <option value="error">Error</option>
+                        <option value="pending">Pending</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- Transcriptions List -->
+        <div class="space-y-4">
+            <!-- Loading state -->
+            <div x-show="loading" x-cloak class="text-center py-12">
+                <i class="fas fa-spinner fa-spin text-4xl text-blue-600"></i>
+                <p class="mt-4 text-gray-600">Loading transcriptions...</p>
+            </div>
+
+            <!-- Empty state -->
+            <div x-show="!loading && transcriptions.length === 0" x-cloak class="text-center py-12 bg-white rounded-lg shadow">
+                <i class="fas fa-comment-slash text-4xl text-gray-400"></i>
+                <p class="mt-4 text-gray-600">No transcriptions found</p>
+                <p class="text-sm text-gray-500">Speech events will appear here when detected</p>
+            </div>
+
+            <!-- Grouped by date -->
+            <template x-for="(group, date) in groupedTranscriptions" :key="date">
+                <div class="bg-white rounded-lg shadow overflow-hidden">
+                    <!-- Date header -->
+                    <div class="bg-gray-50 px-4 py-3 border-b">
+                        <h2 class="font-semibold text-gray-800">
+                            <i class="fas fa-calendar-day text-blue-600 mr-2"></i>
+                            <span x-text="formatDate(date)"></span>
+                            <span class="text-gray-500 font-normal ml-2" x-text="'(' + group.length + ' transcriptions)'"></span>
+                        </h2>
+                    </div>
+                    
+                    <!-- Transcriptions for this date -->
+                    <div class="divide-y">
+                        <template x-for="item in group" :key="item.id">
+                            <div class="p-4 hover:bg-gray-50 transition">
+                                <div class="flex items-start justify-between">
+                                    <div class="flex-1">
+                                        <!-- Header row -->
+                                        <div class="flex items-center space-x-3 mb-2">
+                                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                                <i class="fas fa-video mr-1"></i>
+                                                <span x-text="item.camera_name"></span>
+                                            </span>
+                                            <span class="text-sm text-gray-500">
+                                                <i class="fas fa-clock mr-1"></i>
+                                                <span x-text="formatTime(item.timestamp)"></span>
+                                            </span>
+                                            <span 
+                                                class="text-xs font-medium"
+                                                :class="{
+                                                    'status-completed': item.status === 'completed',
+                                                    'status-processing': item.status === 'processing',
+                                                    'status-error': item.status === 'error',
+                                                    'status-pending': item.status === 'pending'
+                                                }"
+                                            >
+                                                <i class="fas" :class="{
+                                                    'fa-check-circle': item.status === 'completed',
+                                                    'fa-spinner fa-spin': item.status === 'processing',
+                                                    'fa-exclamation-circle': item.status === 'error',
+                                                    'fa-hourglass-half': item.status === 'pending'
+                                                }"></i>
+                                                <span x-text="item.status" class="ml-1 capitalize"></span>
+                                            </span>
+                                            <span x-show="item.duration_seconds" class="text-xs text-gray-500">
+                                                <i class="fas fa-stopwatch mr-1"></i>
+                                                <span x-text="item.duration_seconds?.toFixed(1) + 's'"></span>
+                                            </span>
+                                        </div>
+                                        
+                                        <!-- Transcription text -->
+                                        <div class="bg-gray-50 rounded p-3 mb-2" x-show="item.transcription">
+                                            <p class="text-gray-800 whitespace-pre-wrap" x-text="item.transcription || 'No transcription available'"></p>
+                                        </div>
+                                        
+                                        <!-- Audio player -->
+                                        <div x-show="item.audio_file" class="mt-2">
+                                            <audio 
+                                                controls 
+                                                class="audio-player h-8"
+                                                :src="'/audio/' + item.audio_file"
+                                            >
+                                                Your browser does not support audio playback.
+                                            </audio>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </template>
+        </div>
+
+        <!-- Pagination -->
+        <div x-show="pagination.pages > 1" class="mt-6 flex justify-center items-center space-x-4">
+            <button 
+                @click="prevPage()"
+                :disabled="pagination.page <= 1"
+                class="px-4 py-2 bg-white rounded-lg shadow hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+                <i class="fas fa-chevron-left mr-2"></i>Previous
+            </button>
+            
+            <span class="text-gray-600">
+                Page <span x-text="pagination.page"></span> of <span x-text="pagination.pages"></span>
+            </span>
+            
+            <button 
+                @click="nextPage()"
+                :disabled="pagination.page >= pagination.pages"
+                class="px-4 py-2 bg-white rounded-lg shadow hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+                Next<i class="fas fa-chevron-right ml-2"></i>
+            </button>
+        </div>
+
+        <!-- Footer -->
+        <footer class="mt-8 text-center text-gray-500 text-sm">
+            <p>Protect Transcribe - UniFi Protect Speech Detection &amp; Transcription</p>
+        </footer>
+    </div>
+
+    <script>
+        function transcribeApp() {
+            return {
+                loading: false,
+                transcriptions: [],
+                cameras: [],
+                dates: [],
+                stats: {
+                    total: 0,
+                    completed: 0,
+                    processing: 0,
+                    errors: 0,
+                    today: 0
+                },
+                filters: {
+                    search: '',
+                    camera: '',
+                    date: '',
+                    status: ''
+                },
+                pagination: {
+                    page: 1,
+                    per_page: 20,
+                    total: 0,
+                    pages: 0
+                },
+                
+                async init() {
+                    await this.loadAll();
+                    // Auto-refresh every 30 seconds
+                    setInterval(() => this.refresh(), 30000);
+                },
+                
+                async loadAll() {
+                    await Promise.all([
+                        this.loadStats(),
+                        this.loadCameras(),
+                        this.loadDates(),
+                        this.loadTranscriptions()
+                    ]);
+                },
+                
+                async refresh() {
+                    await this.loadAll();
+                },
+                
+                async loadStats() {
+                    try {
+                        const response = await fetch('/api/stats');
+                        this.stats = await response.json();
+                    } catch (error) {
+                        console.error('Error loading stats:', error);
+                    }
+                },
+                
+                async loadCameras() {
+                    try {
+                        const response = await fetch('/api/cameras');
+                        const data = await response.json();
+                        this.cameras = data.cameras;
+                    } catch (error) {
+                        console.error('Error loading cameras:', error);
+                    }
+                },
+                
+                async loadDates() {
+                    try {
+                        const response = await fetch('/api/dates');
+                        const data = await response.json();
+                        this.dates = data.dates;
+                    } catch (error) {
+                        console.error('Error loading dates:', error);
+                    }
+                },
+                
+                async loadTranscriptions() {
+                    this.loading = true;
+                    try {
+                        const params = new URLSearchParams({
+                            page: this.pagination.page,
+                            per_page: this.pagination.per_page
+                        });
+                        
+                        if (this.filters.search) params.append('search', this.filters.search);
+                        if (this.filters.camera) params.append('camera', this.filters.camera);
+                        if (this.filters.date) params.append('date', this.filters.date);
+                        if (this.filters.status) params.append('status', this.filters.status);
+                        
+                        const response = await fetch(`/api/transcriptions?${params}`);
+                        const data = await response.json();
+                        
+                        this.transcriptions = data.transcriptions;
+                        this.pagination.total = data.total;
+                        this.pagination.pages = data.pages;
+                    } catch (error) {
+                        console.error('Error loading transcriptions:', error);
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                
+                get groupedTranscriptions() {
+                    const groups = {};
+                    for (const item of this.transcriptions) {
+                        const date = item.timestamp ? item.timestamp.split('T')[0] : 'unknown';
+                        if (!groups[date]) {
+                            groups[date] = [];
+                        }
+                        groups[date].push(item);
+                    }
+                    return groups;
+                },
+                
+                formatDate(dateStr) {
+                    if (!dateStr || dateStr === 'unknown') return 'Unknown Date';
+                    const date = new Date(dateStr);
+                    const today = new Date();
+                    const yesterday = new Date(today);
+                    yesterday.setDate(yesterday.getDate() - 1);
+                    
+                    if (date.toDateString() === today.toDateString()) {
+                        return 'Today';
+                    } else if (date.toDateString() === yesterday.toDateString()) {
+                        return 'Yesterday';
+                    }
+                    
+                    return date.toLocaleDateString('da-DK', {
+                        weekday: 'long',
+                        year: 'numeric',
+                        month: 'long',
+                        day: 'numeric'
+                    });
+                },
+                
+                formatTime(timestamp) {
+                    if (!timestamp) return '';
+                    const date = new Date(timestamp);
+                    return date.toLocaleTimeString('da-DK', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit'
+                    });
+                },
+                
+                prevPage() {
+                    if (this.pagination.page > 1) {
+                        this.pagination.page--;
+                        this.loadTranscriptions();
+                    }
+                },
+                
+                nextPage() {
+                    if (this.pagination.page < this.pagination.pages) {
+                        this.pagination.page++;
+                        this.loadTranscriptions();
+                    }
+                }
+            }
+        }
+    </script>
+</body>
+</html>
