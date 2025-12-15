@@ -119,14 +119,33 @@ async def fetch_audio_clip(
     
     The Protect API provides video+audio, so we'll need to
     extract audio using ffmpeg.
+    
+    camera_id can be either a UUID or MAC address.
     """
     try:
         client = await get_protect_client()
         
-        # Get camera by ID
+        # Find camera - could be by UUID or MAC address
+        camera = None
+        
+        # First try direct lookup (UUID)
         camera = client.bootstrap.cameras.get(camera_id)
+        
+        # If not found, try MAC address lookup
         if not camera:
-            logger.error(f"Camera {camera_id} not found")
+            # Normalize MAC address (remove colons/dashes, uppercase)
+            normalized_mac = camera_id.upper().replace(":", "").replace("-", "")
+            for cam in client.bootstrap.cameras.values():
+                cam_mac = cam.mac.upper().replace(":", "").replace("-", "")
+                if cam_mac == normalized_mac:
+                    camera = cam
+                    logger.info(f"Found camera by MAC: {cam.name} ({cam.id})")
+                    break
+        
+        if not camera:
+            logger.error(f"Camera {camera_id} not found (tried UUID and MAC lookup)")
+            # Log available cameras for debugging
+            logger.info(f"Available cameras: {[(c.name, c.mac, c.id) for c in client.bootstrap.cameras.values()]}")
             return None
         
         logger.info(f"Fetching clip from {camera.name} ({start_time} to {end_time})")
@@ -134,7 +153,7 @@ async def fetch_audio_clip(
         # Use the API's get_camera_video method to download video
         # This returns the video as bytes
         video_data = await client.get_camera_video(
-            camera_id,
+            camera.id,  # Use the actual camera UUID
             start_time,
             end_time,
             channel=0  # Main channel (highest quality with audio)
@@ -239,15 +258,27 @@ async def process_speech_event(
             logger.info(f"Event {event_id} already processed, skipping")
             return
         
-        # Get camera info
+        # Get camera info - handle both UUID and MAC address
         client = await get_protect_client()
         camera = client.bootstrap.cameras.get(camera_id)
-        camera_name = camera.name if camera else "Unknown"
+        
+        # If not found by UUID, try MAC address
+        if not camera:
+            normalized_mac = camera_id.upper().replace(":", "").replace("-", "")
+            for cam in client.bootstrap.cameras.values():
+                cam_mac = cam.mac.upper().replace(":", "").replace("-", "")
+                if cam_mac == normalized_mac:
+                    camera = cam
+                    break
+        
+        camera_name = camera.name if camera else f"Unknown ({camera_id})"
         
         # Calculate time range
         event_time = datetime.fromtimestamp(timestamp_ms / 1000)
         start_time = event_time - timedelta(seconds=AUDIO_BUFFER_BEFORE)
         end_time = event_time + timedelta(seconds=AUDIO_BUFFER_AFTER)
+        
+        logger.info(f"Processing speech event from {camera_name} at {event_time}")
         
         # Insert pending record
         cursor.execute("""
@@ -409,21 +440,29 @@ async def receive_webhook(
         for trigger in triggers:
             trigger_key = trigger.get("key", "")
             camera_id = trigger.get("device", "")
+            event_id_from_protect = trigger.get("eventId", "")
+            trigger_timestamp = trigger.get("timestamp", timestamp)
             
-            # Only process speech events
-            if trigger_key.lower() in ["speech", "voice", "talking"]:
-                # Generate unique event ID
-                event_id = f"{camera_id}_{timestamp}_{trigger_key}"
+            logger.debug(f"Processing trigger: key={trigger_key}, device={camera_id}")
+            
+            # Only process speech events (audio_alarm_speak is the UniFi Protect key)
+            if trigger_key.lower() in ["speech", "voice", "talking", "audio_alarm_speak"]:
+                # Use Protect's event ID if available, otherwise generate one
+                event_id = event_id_from_protect or f"{camera_id}_{trigger_timestamp}_{trigger_key}"
+                
+                logger.info(f"Speech event detected: key={trigger_key}, camera={camera_id}, event_id={event_id}")
                 
                 # Process in background
                 background_tasks.add_task(
                     process_speech_event,
                     event_id,
                     camera_id,
-                    timestamp
+                    trigger_timestamp  # Use trigger-specific timestamp
                 )
                 
                 logger.info(f"Queued speech event {event_id} for processing")
+            else:
+                logger.debug(f"Ignoring non-speech trigger: {trigger_key}")
         
         return {"status": "accepted", "message": "Webhook received"}
         
