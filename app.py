@@ -705,6 +705,101 @@ async def get_stats():
         conn.close()
 
 
+@app.delete("/api/transcriptions/{transcription_id}")
+async def delete_transcription(transcription_id: int):
+    """Delete a transcription and its audio file."""
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    try:
+        # Get the transcription first to find the audio file
+        cursor.execute("SELECT * FROM transcriptions WHERE id = ?", (transcription_id,))
+        row = cursor.fetchone()
+        
+        if not row:
+            raise HTTPException(status_code=404, detail="Transcription not found")
+        
+        # Delete the audio file if it exists
+        if row["audio_file"]:
+            audio_path = Path(AUDIO_PATH) / row["audio_file"]
+            if audio_path.exists():
+                audio_path.unlink()
+                logger.info(f"Deleted audio file: {audio_path}")
+        
+        # Delete the database record
+        cursor.execute("DELETE FROM transcriptions WHERE id = ?", (transcription_id,))
+        conn.commit()
+        
+        logger.info(f"Deleted transcription {transcription_id}")
+        return {"status": "deleted", "id": transcription_id}
+        
+    finally:
+        conn.close()
+
+
+@app.post("/api/transcriptions/{transcription_id}/retry")
+async def retry_transcription(
+    transcription_id: int,
+    background_tasks: BackgroundTasks
+):
+    """Retry a transcription - re-fetches audio and re-transcribes."""
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    try:
+        # Get the original transcription record
+        cursor.execute("SELECT * FROM transcriptions WHERE id = ?", (transcription_id,))
+        row = cursor.fetchone()
+        
+        if not row:
+            raise HTTPException(status_code=404, detail="Transcription not found")
+        
+        event_id = row["event_id"]
+        camera_id = row["camera_id"]
+        timestamp_str = row["timestamp"]
+        
+        # Parse the timestamp back to milliseconds
+        try:
+            # Handle ISO format timestamp
+            dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            timestamp_ms = int(dt.timestamp() * 1000)
+        except Exception as e:
+            logger.error(f"Failed to parse timestamp {timestamp_str}: {e}")
+            raise HTTPException(status_code=400, detail=f"Invalid timestamp format: {timestamp_str}")
+        
+        # Delete the old audio file if it exists
+        if row["audio_file"]:
+            old_audio_path = Path(AUDIO_PATH) / row["audio_file"]
+            if old_audio_path.exists():
+                old_audio_path.unlink()
+        
+        # Delete the old record
+        cursor.execute("DELETE FROM transcriptions WHERE id = ?", (transcription_id,))
+        conn.commit()
+        
+        logger.info(f"Retrying transcription {transcription_id} (event {event_id})")
+        
+        # Queue the re-processing (skip the wait since this is a retry)
+        background_tasks.add_task(
+            process_speech_event,
+            event_id,
+            camera_id,
+            timestamp_ms
+        )
+        
+        return {
+            "status": "queued",
+            "id": transcription_id,
+            "event_id": event_id,
+            "message": "Transcription retry queued"
+        }
+        
+    finally:
+        conn.close()
+
+
 @app.get("/audio/{filename}")
 async def get_audio(filename: str):
     """Serve audio files."""
