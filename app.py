@@ -57,7 +57,7 @@ protect_client: Optional[ProtectApiClient] = None
 
 
 def init_database():
-    """Initialize SQLite database with required tables."""
+    """Initialize SQLite database with required tables and FTS5 for full-text search."""
     Path(DATABASE_PATH).parent.mkdir(parents=True, exist_ok=True)
     
     conn = sqlite3.connect(DATABASE_PATH)
@@ -89,6 +89,40 @@ def init_database():
     """)
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_status ON transcriptions(status)
+    """)
+    
+    # FTS5 virtual table for fast full-text search
+    cursor.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS transcriptions_fts USING fts5(
+            transcription,
+            camera_name,
+            content='transcriptions',
+            content_rowid='id'
+        )
+    """)
+    
+    # Triggers to keep FTS index in sync with main table
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS transcriptions_ai AFTER INSERT ON transcriptions BEGIN
+            INSERT INTO transcriptions_fts(rowid, transcription, camera_name)
+            VALUES (new.id, new.transcription, new.camera_name);
+        END
+    """)
+    
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS transcriptions_ad AFTER DELETE ON transcriptions BEGIN
+            INSERT INTO transcriptions_fts(transcriptions_fts, rowid, transcription, camera_name)
+            VALUES ('delete', old.id, old.transcription, old.camera_name);
+        END
+    """)
+    
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS transcriptions_au AFTER UPDATE ON transcriptions BEGIN
+            INSERT INTO transcriptions_fts(transcriptions_fts, rowid, transcription, camera_name)
+            VALUES ('delete', old.id, old.transcription, old.camera_name);
+            INSERT INTO transcriptions_fts(rowid, transcription, camera_name)
+            VALUES (new.id, new.transcription, new.camera_name);
+        END
     """)
     
     # Settings table for configurable parameters
@@ -124,9 +158,15 @@ def init_database():
         logger.info("Migrating database: adding segments column")
         cursor.execute("ALTER TABLE transcriptions ADD COLUMN segments TEXT")
     
+    # Rebuild FTS index to include existing data (idempotent)
+    try:
+        cursor.execute("INSERT INTO transcriptions_fts(transcriptions_fts) VALUES('rebuild')")
+    except sqlite3.OperationalError:
+        pass  # Table might be empty or already synced
+    
     conn.commit()
     conn.close()
-    logger.info(f"Database initialized at {DATABASE_PATH}")
+    logger.info(f"Database initialized at {DATABASE_PATH} with FTS5 support")
 
 
 def get_settings() -> dict:
@@ -318,6 +358,7 @@ async def fetch_audio_clip(
         
         try:
             # Extract audio to WAV (16kHz mono - optimal for Whisper)
+            # Audio filters: highpass removes low-frequency rumble, loudnorm normalizes volume
             result = subprocess.run([
                 "ffmpeg", "-y",
                 "-i", video_path,
@@ -325,8 +366,9 @@ async def fetch_audio_clip(
                 "-acodec", "pcm_s16le",
                 "-ar", "16000",  # 16kHz
                 "-ac", "1",  # Mono
+                "-af", "highpass=f=200,loudnorm",  # Remove rumble, normalize volume
                 audio_path
-            ], capture_output=True, text=True, timeout=60)
+            ], capture_output=True, text=True, timeout=120)
             
             if result.returncode != 0:
                 logger.error(f"ffmpeg error (exit code {result.returncode}): {result.stderr}")
@@ -377,7 +419,9 @@ async def transcribe_audio(audio_data: bytes) -> dict:
             data = {
                 "model": model,
                 "language": language,
-                "response_format": "verbose_json"
+                "response_format": "verbose_json",
+                "temperature": "0.0",  # Deterministic output for better accuracy
+                "initial_prompt": "Dette er en optagelse fra et overvågningskamera i et privat hjem. Samtalen er på dansk."
             }
             
             # Add VAD filter if enabled (helps remove silence/noise)
@@ -405,81 +449,88 @@ async def transcribe_audio(audio_data: bytes) -> dict:
         return {"error": str(e)}
 
 
-async def process_speech_event(
+def queue_transcription(
     event_id: str,
     camera_id: str,
+    camera_name: str,
     timestamp_ms: int,
-    skip_wait: bool = False
-):
+    language: str = 'da'
+) -> bool:
     """
-    Process a speech detection event:
-    1. Fetch audio from NVR
-    2. Transcribe with Whisper
-    3. Store in database
-    
-    Args:
-        event_id: Unique event identifier
-        camera_id: Camera UUID or MAC address
-        timestamp_ms: Event timestamp in milliseconds since epoch
-        skip_wait: If True, skip waiting for recording (for retries/sync)
+    Queue a transcription by inserting a pending record into the database.
+    Returns True if queued, False if already exists.
     """
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
     cursor = conn.cursor()
     
     try:
-        # Check if already processed
+        # Check if already exists
         cursor.execute("SELECT id FROM transcriptions WHERE event_id = ?", (event_id,))
         if cursor.fetchone():
-            logger.info(f"Event {event_id} already processed, skipping")
-            return
+            logger.debug(f"Event {event_id} already exists, skipping queue")
+            return False
+        
+        # Calculate event time
+        event_time = datetime.fromtimestamp(timestamp_ms / 1000, tz=LOCAL_TZ)
+        
+        # Insert pending record - worker will pick it up
+        cursor.execute("""
+            INSERT INTO transcriptions (event_id, camera_id, camera_name, timestamp, status, language)
+            VALUES (?, ?, ?, ?, 'pending', ?)
+        """, (event_id, camera_id, camera_name, event_time.isoformat(), language))
+        conn.commit()
+        
+        logger.info(f"Queued transcription for event {event_id} from {camera_name}")
+        return True
+        
+    except sqlite3.IntegrityError:
+        # Event already exists (race condition)
+        logger.debug(f"Event {event_id} already exists (integrity error)")
+        return False
+    finally:
+        conn.close()
+
+
+async def process_pending_transcription(row: dict) -> None:
+    """
+    Process a single pending transcription record.
+    Fetches audio, transcribes, and updates the database.
+    """
+    event_id = row['event_id']
+    camera_id = row['camera_id']
+    camera_name = row['camera_name']
+    timestamp_str = row['timestamp']
+    record_id = row['id']
+    
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
+    cursor = conn.cursor()
+    
+    try:
+        # Mark as processing
+        cursor.execute("""
+            UPDATE transcriptions SET status = 'processing' WHERE id = ?
+        """, (record_id,))
+        conn.commit()
         
         # Get settings from database
         settings = get_settings()
         buffer_before = int(settings.get('buffer_before', '5'))
-        buffer_after = int(settings.get('buffer_after', '10'))
-        language = settings.get('language', 'da')
+        buffer_after = int(settings.get('buffer_after', '60'))
         
-        # Get camera info - handle both UUID and MAC address
-        client = await get_protect_client()
-        camera = client.bootstrap.cameras.get(camera_id)
+        # Parse timestamp
+        try:
+            event_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            if event_time.tzinfo is None:
+                event_time = event_time.replace(tzinfo=LOCAL_TZ)
+        except Exception as e:
+            logger.error(f"Failed to parse timestamp {timestamp_str}: {e}")
+            raise ValueError(f"Invalid timestamp: {timestamp_str}")
         
-        # If not found by UUID, try MAC address
-        if not camera:
-            normalized_mac = camera_id.upper().replace(":", "").replace("-", "")
-            for cam in client.bootstrap.cameras.values():
-                cam_mac = cam.mac.upper().replace(":", "").replace("-", "")
-                if cam_mac == normalized_mac:
-                    camera = cam
-                    break
-        
-        camera_name = camera.name if camera else f"Unknown ({camera_id})"
-        
-        # Calculate time range with timezone awareness
-        # UniFi Protect timestamps are in milliseconds since epoch (UTC)
-        # Convert to timezone-aware datetime in local timezone
-        event_time = datetime.fromtimestamp(timestamp_ms / 1000, tz=LOCAL_TZ)
         start_time = event_time - timedelta(seconds=buffer_before)
         end_time = event_time + timedelta(seconds=buffer_after)
         
-        logger.info(f"Processing speech event from {camera_name} at {event_time.isoformat()}")
+        logger.info(f"Processing event {event_id} from {camera_name} at {event_time.isoformat()}")
         logger.info(f"Using buffer: {buffer_before}s before, {buffer_after}s after")
-        
-        # Insert pending record
-        cursor.execute("""
-            INSERT INTO transcriptions (event_id, camera_id, camera_name, timestamp, status, language)
-            VALUES (?, ?, ?, ?, 'processing', ?)
-        """, (event_id, camera_id, camera_name, event_time.isoformat(), language))
-        conn.commit()
-        
-        # Wait for recording to complete (only for real-time events, not retries)
-        if not skip_wait:
-            # We need to wait at least buffer_after seconds after the event
-            # Plus a small buffer for the NVR to finish writing
-            wait_seconds = buffer_after + 5
-            logger.info(f"Waiting {wait_seconds}s for recording to complete...")
-            await asyncio.sleep(wait_seconds)
-        else:
-            logger.info("Skipping wait (retry/sync mode)")
         
         # Fetch audio
         audio_data = await fetch_audio_clip(camera_id, start_time, end_time)
@@ -487,8 +538,8 @@ async def process_speech_event(
         if not audio_data:
             cursor.execute("""
                 UPDATE transcriptions SET status = 'error', transcription = 'Failed to fetch audio'
-                WHERE event_id = ?
-            """, (event_id,))
+                WHERE id = ?
+            """, (record_id,))
             conn.commit()
             return
         
@@ -501,15 +552,15 @@ async def process_speech_event(
         with open(audio_filepath, "wb") as f:
             f.write(audio_data)
         
-        # Transcribe using settings from database
+        # Transcribe
         result = await transcribe_audio(audio_data)
         
         if "error" in result:
             cursor.execute("""
                 UPDATE transcriptions 
                 SET status = 'error', transcription = ?, audio_file = ?
-                WHERE event_id = ?
-            """, (f"Transcription error: {result['error']}", audio_filename, event_id))
+                WHERE id = ?
+            """, (f"Transcription error: {result['error']}", audio_filename, record_id))
         else:
             # Calculate duration from audio file
             duration = len(audio_data) / (16000 * 2)  # 16kHz, 16-bit
@@ -527,7 +578,7 @@ async def process_speech_event(
                     confidence = ?,
                     audio_file = ?,
                     duration_seconds = ?
-                WHERE event_id = ?
+                WHERE id = ?
             """, (
                 result.get("text", ""),
                 segments_json,
@@ -535,21 +586,94 @@ async def process_speech_event(
                 result.get("confidence", 0),
                 audio_filename,
                 duration,
-                event_id
+                record_id
             ))
         
         conn.commit()
-        logger.info(f"Processed event {event_id} from {camera_name}")
+        logger.info(f"Completed processing event {event_id} from {camera_name}")
         
     except Exception as e:
         logger.exception(f"Error processing event {event_id}: {e}")
-        cursor.execute("""
-            UPDATE transcriptions SET status = 'error', transcription = ?
-            WHERE event_id = ?
-        """, (str(e), event_id))
-        conn.commit()
+        try:
+            cursor.execute("""
+                UPDATE transcriptions SET status = 'error', transcription = ?
+                WHERE id = ?
+            """, (str(e)[:500], record_id))
+            conn.commit()
+        except Exception:
+            pass
     finally:
         conn.close()
+
+
+async def transcription_worker():
+    """
+    Background worker that polls for pending transcriptions and processes them.
+    Runs in an infinite loop, processing one event at a time to avoid DB locks.
+    """
+    logger.info("Transcription worker started")
+    
+    while True:
+        try:
+            # Fetch one pending record
+            conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT id, event_id, camera_id, camera_name, timestamp, language
+                FROM transcriptions
+                WHERE status = 'pending'
+                ORDER BY timestamp ASC
+                LIMIT 1
+            """)
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                # Process this transcription
+                await process_pending_transcription(dict(row))
+                # Small delay between processing to avoid overwhelming the system
+                await asyncio.sleep(1)
+            else:
+                # No pending work, wait before polling again
+                await asyncio.sleep(5)
+                
+        except Exception as e:
+            logger.exception(f"Error in transcription worker: {e}")
+            await asyncio.sleep(10)  # Wait longer on error
+
+
+# Keep legacy function for compatibility with retry endpoint
+async def process_speech_event(
+    event_id: str,
+    camera_id: str,
+    timestamp_ms: int,
+    skip_wait: bool = False
+):
+    """
+    Legacy function for processing speech events.
+    Now just queues the event for the worker to process.
+    """
+    # Get camera name
+    try:
+        client = await get_protect_client()
+        camera = client.bootstrap.cameras.get(camera_id)
+        if not camera:
+            normalized_mac = camera_id.upper().replace(":", "").replace("-", "")
+            for cam in client.bootstrap.cameras.values():
+                cam_mac = cam.mac.upper().replace(":", "").replace("-", "")
+                if cam_mac == normalized_mac:
+                    camera = cam
+                    break
+        camera_name = camera.name if camera else f"Unknown ({camera_id})"
+    except Exception:
+        camera_name = f"Unknown ({camera_id})"
+    
+    settings = get_settings()
+    language = settings.get('language', 'da')
+    
+    queue_transcription(event_id, camera_id, camera_name, timestamp_ms, language)
 
 
 # Pydantic models
@@ -585,9 +709,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Could not connect to Protect on startup: {e}")
     
+    # Start the transcription worker as a background task
+    worker_task = asyncio.create_task(transcription_worker())
+    logger.info("Started transcription worker task")
+    
     yield
     
     # Shutdown
+    worker_task.cancel()
+    try:
+        await worker_task
+    except asyncio.CancelledError:
+        logger.info("Transcription worker cancelled")
+    
     global protect_client
     if protect_client:
         await protect_client.close()
@@ -610,10 +744,7 @@ async def health_check():
 
 
 @app.post("/api/webhook")
-async def receive_webhook(
-    request: Request,
-    background_tasks: BackgroundTasks
-):
+async def receive_webhook(request: Request):
     """
     Receive webhook from UniFi Protect Alarm Manager.
     
@@ -637,6 +768,12 @@ async def receive_webhook(
         # Extract camera ID and trigger type from payload
         triggers = alarm.get("triggers", [])
         
+        # Get settings for language
+        settings = get_settings()
+        language = settings.get('language', 'da')
+        
+        events_queued = 0
+        
         for trigger in triggers:
             trigger_key = trigger.get("key", "")
             camera_id = trigger.get("device", "")
@@ -652,19 +789,29 @@ async def receive_webhook(
                 
                 logger.info(f"Speech event detected: key={trigger_key}, camera={camera_id}, event_id={event_id}")
                 
-                # Process in background
-                background_tasks.add_task(
-                    process_speech_event,
-                    event_id,
-                    camera_id,
-                    trigger_timestamp  # Use trigger-specific timestamp
-                )
+                # Get camera name
+                try:
+                    client = await get_protect_client()
+                    camera = client.bootstrap.cameras.get(camera_id)
+                    if not camera:
+                        normalized_mac = camera_id.upper().replace(":", "").replace("-", "")
+                        for cam in client.bootstrap.cameras.values():
+                            cam_mac = cam.mac.upper().replace(":", "").replace("-", "")
+                            if cam_mac == normalized_mac:
+                                camera = cam
+                                break
+                    camera_name = camera.name if camera else f"Unknown ({camera_id})"
+                except Exception:
+                    camera_name = f"Unknown ({camera_id})"
                 
-                logger.info(f"Queued speech event {event_id} for processing")
+                # Queue for processing (worker will pick it up)
+                if queue_transcription(event_id, camera_id, camera_name, trigger_timestamp, language):
+                    events_queued += 1
+                    logger.info(f"Queued speech event {event_id} for processing")
             else:
                 logger.debug(f"Ignoring non-speech trigger: {trigger_key}")
         
-        return {"status": "accepted", "message": "Webhook received"}
+        return {"status": "accepted", "message": f"Webhook received, {events_queued} events queued"}
         
     except Exception as e:
         logger.exception(f"Error processing webhook: {e}")
@@ -682,46 +829,87 @@ async def get_transcriptions(
 ):
     """
     Get transcriptions with filtering and pagination.
+    Uses FTS5 for fast full-text search.
     """
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
     try:
-        # Build query
-        where_clauses = []
-        params = []
-        
-        if camera:
-            where_clauses.append("camera_name = ?")
-            params.append(camera)
-        
-        if date:
-            where_clauses.append("DATE(timestamp) = ?")
-            params.append(date)
-        
+        # Build query - use FTS5 for search if provided
         if search:
-            where_clauses.append("transcription LIKE ?")
-            params.append(f"%{search}%")
-        
-        if status:
-            where_clauses.append("status = ?")
-            params.append(status)
-        
-        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-        
-        # Get total count
-        cursor.execute(f"SELECT COUNT(*) FROM transcriptions WHERE {where_sql}", params)
-        total = cursor.fetchone()[0]
-        
-        # Get paginated results
-        offset = (page - 1) * per_page
-        cursor.execute(f"""
-            SELECT * FROM transcriptions 
-            WHERE {where_sql}
-            ORDER BY timestamp DESC
-            LIMIT ? OFFSET ?
-        """, params + [per_page, offset])
+            # Use FTS5 MATCH for fast full-text search
+            # Escape special FTS5 characters
+            search_term = search.replace('"', '""')
+            
+            # Build additional filters
+            where_clauses = []
+            params = []
+            
+            if camera:
+                where_clauses.append("t.camera_name = ?")
+                params.append(camera)
+            
+            if date:
+                where_clauses.append("DATE(t.timestamp) = ?")
+                params.append(date)
+            
+            if status:
+                where_clauses.append("t.status = ?")
+                params.append(status)
+            
+            additional_where = " AND " + " AND ".join(where_clauses) if where_clauses else ""
+            
+            # Get total count with FTS5
+            cursor.execute(f"""
+                SELECT COUNT(*) FROM transcriptions t
+                INNER JOIN transcriptions_fts fts ON t.id = fts.rowid
+                WHERE transcriptions_fts MATCH ?
+                {additional_where}
+            """, [f'"{search_term}"'] + params)
+            total = cursor.fetchone()[0]
+            
+            # Get paginated results with FTS5
+            offset = (page - 1) * per_page
+            cursor.execute(f"""
+                SELECT t.* FROM transcriptions t
+                INNER JOIN transcriptions_fts fts ON t.id = fts.rowid
+                WHERE transcriptions_fts MATCH ?
+                {additional_where}
+                ORDER BY t.timestamp DESC
+                LIMIT ? OFFSET ?
+            """, [f'"{search_term}"'] + params + [per_page, offset])
+        else:
+            # No search - use regular query
+            where_clauses = []
+            params = []
+            
+            if camera:
+                where_clauses.append("camera_name = ?")
+                params.append(camera)
+            
+            if date:
+                where_clauses.append("DATE(timestamp) = ?")
+                params.append(date)
+            
+            if status:
+                where_clauses.append("status = ?")
+                params.append(status)
+            
+            where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+            
+            # Get total count
+            cursor.execute(f"SELECT COUNT(*) FROM transcriptions WHERE {where_sql}", params)
+            total = cursor.fetchone()[0]
+            
+            # Get paginated results
+            offset = (page - 1) * per_page
+            cursor.execute(f"""
+                SELECT * FROM transcriptions 
+                WHERE {where_sql}
+                ORDER BY timestamp DESC
+                LIMIT ? OFFSET ?
+            """, params + [per_page, offset])
         
         rows = cursor.fetchall()
         
@@ -989,12 +1177,12 @@ async def test_protect_connection():
 
 @app.post("/api/sync")
 async def sync_speech_events(
-    background_tasks: BackgroundTasks,
-    hours: int = Query(default=24, ge=1, le=168)  # 1 hour to 7 days
+    hours: int = Query(default=24, ge=1, le=720)  # 1 hour to 30 days
 ):
     """
     Sync speech events from UniFi Protect NVR.
     Fetches recent speech detection events and queues any missing ones for transcription.
+    Skips live/ongoing events (where end is None) to avoid file errors.
     """
     try:
         host = get_protect_host()
@@ -1010,15 +1198,20 @@ async def sync_speech_events(
         logger.info(f"Syncing speech events from {start_time.isoformat()} to {end_time.isoformat()}")
         
         # Get existing event IDs to avoid duplicates
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
         cursor = conn.cursor()
         cursor.execute("SELECT event_id FROM transcriptions")
         existing_events = {row[0] for row in cursor.fetchall()}
         conn.close()
         
+        # Get settings for language
+        settings = get_settings()
+        language = settings.get('language', 'da')
+        
         events_found = 0
         events_queued = 0
         events_skipped = 0
+        events_live_skipped = 0
         errors = []
         speech_events_found = 0
         all_smart_types = set()
@@ -1031,7 +1224,6 @@ async def sync_speech_events(
                 start=start_time,
                 end=end_time,
             )
-            
             
             for event in events:
                 events_found += 1
@@ -1065,6 +1257,13 @@ async def sync_speech_events(
                 
                 speech_events_found += 1
                 
+                # CRUCIAL: Skip live/ongoing events (end is None) to avoid file errors
+                event_end = getattr(event, 'end', None)
+                if event_end is None:
+                    events_live_skipped += 1
+                    logger.debug(f"Skipping live event {event.id} (end is None)")
+                    continue
+                
                 event_id = str(event.id)
                 
                 if event_id in existing_events:
@@ -1095,17 +1294,10 @@ async def sync_speech_events(
                 
                 logger.info(f"Queuing missing event {event_id} from {camera_name} at {event_time}")
                 
-                # Queue for processing with skip_wait=True since recording exists
-                background_tasks.add_task(
-                    process_speech_event,
-                    event_id,
-                    str(camera_id),
-                    timestamp_ms,
-                    True  # skip_wait
-                )
-                
-                existing_events.add(event_id)  # Track to avoid duplicate queuing
-                events_queued += 1
+                # Queue for processing (worker will pick it up)
+                if queue_transcription(event_id, str(camera_id), camera_name, timestamp_ms, language):
+                    events_queued += 1
+                    existing_events.add(event_id)  # Track to avoid duplicate queuing
                 
         except AttributeError as e:
             error_msg = f"API method not available: {e}"
@@ -1119,7 +1311,7 @@ async def sync_speech_events(
         # Log all unique types found for debugging
         logger.info(f"DEBUG All event types found: {all_event_types}")
         logger.info(f"DEBUG All smart detect types found: {all_smart_types}")
-        logger.info(f"DEBUG Speech events found: {speech_events_found}")
+        logger.info(f"DEBUG Speech events found: {speech_events_found}, live skipped: {events_live_skipped}")
         
         result = {
             "status": "completed",
@@ -1128,6 +1320,7 @@ async def sync_speech_events(
             "speech_events_found": speech_events_found,
             "events_queued": events_queued,
             "events_skipped": events_skipped,
+            "events_live_skipped": events_live_skipped,
             "message": f"Queued {events_queued} new events for transcription",
             "debug_smart_types": list(all_smart_types),  # Include in response for easy viewing
             "debug_event_types": list(all_event_types)
@@ -1260,13 +1453,58 @@ def format_srt_time(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
+@app.post("/api/database/reset")
+async def reset_database():
+    """
+    Factory reset: Delete all transcriptions and audio files, but keep settings.
+    This is a destructive operation that cannot be undone.
+    """
+    try:
+        conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
+        cursor = conn.cursor()
+        
+        # Count records being deleted
+        cursor.execute("SELECT COUNT(*) FROM transcriptions")
+        transcription_count = cursor.fetchone()[0]
+        
+        # Delete all transcriptions (FTS table will be updated via trigger)
+        cursor.execute("DELETE FROM transcriptions")
+        conn.commit()
+        
+        # Vacuum the database to reclaim space
+        cursor.execute("VACUUM")
+        conn.commit()
+        conn.close()
+        
+        # Delete all audio files
+        audio_files_deleted = 0
+        audio_dir = Path(AUDIO_PATH)
+        if audio_dir.exists():
+            for audio_file in audio_dir.glob("*.wav"):
+                try:
+                    audio_file.unlink()
+                    audio_files_deleted += 1
+                except Exception as e:
+                    logger.warning(f"Failed to delete audio file {audio_file}: {e}")
+        
+        logger.info(f"Database reset: deleted {transcription_count} transcriptions and {audio_files_deleted} audio files")
+        
+        return {
+            "status": "success",
+            "message": "Database reset successfully",
+            "transcriptions_deleted": transcription_count,
+            "audio_files_deleted": audio_files_deleted
+        }
+        
+    except Exception as e:
+        logger.exception(f"Error resetting database: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/transcriptions/{transcription_id}/retry")
-async def retry_transcription(
-    transcription_id: int,
-    background_tasks: BackgroundTasks
-):
+async def retry_transcription(transcription_id: int):
     """Retry a transcription - re-fetches audio and re-transcribes."""
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
@@ -1280,6 +1518,7 @@ async def retry_transcription(
         
         event_id = row["event_id"]
         camera_id = row["camera_id"]
+        camera_name = row["camera_name"]
         timestamp_str = row["timestamp"]
         
         # Parse the timestamp back to milliseconds
@@ -1297,20 +1536,19 @@ async def retry_transcription(
             if old_audio_path.exists():
                 old_audio_path.unlink()
         
-        # Delete the old record
+        # Delete the old record (so we can re-insert with pending status)
         cursor.execute("DELETE FROM transcriptions WHERE id = ?", (transcription_id,))
         conn.commit()
+        conn.close()
         
         logger.info(f"Retrying transcription {transcription_id} (event {event_id})")
         
-        # Queue the re-processing with skip_wait=True since recording already exists
-        background_tasks.add_task(
-            process_speech_event,
-            event_id,
-            camera_id,
-            timestamp_ms,
-            True  # skip_wait
-        )
+        # Get settings for language
+        settings = get_settings()
+        language = settings.get('language', 'da')
+        
+        # Queue for processing (worker will pick it up)
+        queue_transcription(event_id, camera_id, camera_name, timestamp_ms, language)
         
         return {
             "status": "queued",
@@ -1319,8 +1557,12 @@ async def retry_transcription(
             "message": "Transcription retry queued"
         }
         
-    finally:
+    except HTTPException:
+        raise
+    except Exception as e:
         conn.close()
+        logger.exception(f"Error retrying transcription: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/audio/{filename}")
