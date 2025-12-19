@@ -844,6 +844,9 @@
                                         queued <span x-text="syncResult.events_queued"></span> new,
                                         skipped <span x-text="syncResult.events_skipped"></span> existing
                                     </div>
+                                    <div x-show="syncResult.debug_smart_types" class="mt-2 text-xs text-gray-600">
+                                        <strong>Smart types found:</strong> <span x-text="syncResult.debug_smart_types?.join(', ') || 'none'"></span>
+                                    </div>
                                     <div x-show="syncResult.errors" class="mt-2 text-xs text-yellow-700">
                                         <i class="fas fa-exclamation-triangle mr-1"></i>
                                         <span x-text="syncResult.errors?.join(', ')"></span>
