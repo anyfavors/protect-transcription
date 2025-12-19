@@ -6,6 +6,7 @@ on:
     tags: [ 'v*' ]
   workflow_dispatch:
 
+# VIGTIGT: Tilladelser til Release, Packages og Security scanning
 permissions:
   contents: write
   packages: write
@@ -21,8 +22,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # OPTIMERING: Cache Trivy databasen
-      # Dette sparer tid på download af sårbarheds-DB
+      # --- CACHE TRIN 1: Trivy DB ---
       - name: Cache Trivy DB
         uses: actions/cache@v4
         with:
@@ -31,8 +31,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-trivy-
 
-      # TRIN 1: Tjek indholdet (Code/Dependencies)
-      # Vi fortæller Trivy at den skal bruge vores cache mappe
+      # TRIN 1: Scan kode (Bruger cache)
       - name: Run Trivy vulnerability scanner (Filesystem)
         uses: aquasecurity/trivy-action@master
         with:
@@ -40,8 +39,9 @@ jobs:
           ignore-unfixed: true
           format: 'table'
           exit-code: '1'
-          cache-dir: .trivy # <--- VIGTIGT: Brug cachen
+          cache-dir: .trivy
 
+      # TRIN 2: Beregn version og lav Git Tag
       - name: Calculate Semantic Version
         id: semantic_version
         uses: PaulHatch/semantic-version@v5.4.0
@@ -76,8 +76,7 @@ jobs:
             type=semver,pattern={{version}},value=${{ steps.semantic_version.outputs.version }}
             type=sha,format=long
 
-      # TRIN 2: Byg og Push
-      # Her bruger vi GitHubs interne cache til Docker layers
+      # --- CACHE TRIN 2: Docker Layers (type=gha) ---
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -86,11 +85,23 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha # Hent cache fra GitHub
-          cache-to: type=gha,mode=max # Gem ny cache til GitHub
+          # Dette gemmer build-lagene direkte i GitHub Actions cache
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      # TRIN 3: Tjek indpakningen (Final Image)
-      # Igen, brug cachen så vi ikke henter DB forfra
+      # TRIN 3: Opret GitHub Release ( Changelog )
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.semantic_version.outputs.version }}
+          name: Release v${{ steps.semantic_version.outputs.version }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # TRIN 4: Scan det færdige image (Bruger cache)
       - name: Run Trivy vulnerability scanner (Image)
         uses: aquasecurity/trivy-action@master
         with:
@@ -99,4 +110,4 @@ jobs:
           exit-code: '1'
           ignore-unfixed: true
           severity: 'CRITICAL,HIGH'
-          cache-dir: .trivy # <--- VIGTIGT: Brug cachen
+          cache-dir: .trivy
