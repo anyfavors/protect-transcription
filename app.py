@@ -645,8 +645,8 @@ async def receive_webhook(
             
             logger.debug(f"Processing trigger: key={trigger_key}, device={camera_id}")
             
-            # Only process speech events (audio_alarm_speak is the UniFi Protect key)
-            if trigger_key.lower() in ["speech", "voice", "talking", "audio_alarm_speak"]:
+            # Only process speech events (audio_alarm_speak / alrmspeak is the UniFi Protect key)
+            if trigger_key.lower() in ["speech", "voice", "talking", "audio_alarm_speak", "alrmspeak"]:
                 # Use Protect's event ID if available, otherwise generate one
                 event_id = event_id_from_protect or f"{camera_id}_{trigger_timestamp}_{trigger_key}"
                 
@@ -1058,8 +1058,8 @@ async def sync_speech_events(
                     smart_types_str.append(type_str)
                     all_smart_types.add(type_str)
                 
-                # Only process speech events - try multiple possible names
-                is_speech = any(s in ['speech', 'speechdetect', 'audio', 'talk', 'voice'] for s in smart_types_str)
+                # Only process speech events - UniFi calls it 'alrmspeak'
+                is_speech = any(s in ['alrmspeak', 'speech', 'speechdetect'] for s in smart_types_str)
                 if not is_speech:
                     continue
                 
