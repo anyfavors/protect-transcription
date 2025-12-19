@@ -6,10 +6,10 @@ on:
     tags: [ 'v*' ]
   workflow_dispatch:
 
-# VIGTIGT: Giver lov til at oprette tags og pushe images
 permissions:
   contents: write
   packages: write
+  security-events: write
 
 jobs:
   build:
@@ -19,18 +19,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Nødvendig for at beregne versionshistorik
+          fetch-depth: 0
 
-      # Hurtig sikkerhedsscan af filerne (før build)
+      # OPTIMERING: Cache Trivy databasen
+      # Dette sparer tid på download af sårbarheds-DB
+      - name: Cache Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: .trivy
+          key: ${{ runner.os }}-trivy-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-trivy-
+
+      # TRIN 1: Tjek indholdet (Code/Dependencies)
+      # Vi fortæller Trivy at den skal bruge vores cache mappe
       - name: Run Trivy vulnerability scanner (Filesystem)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
           ignore-unfixed: true
           format: 'table'
-          exit-code: '0'
+          exit-code: '1'
+          cache-dir: .trivy # <--- VIGTIGT: Brug cachen
 
-      # FIX: Beregner versionsnummeret baseret på commits
       - name: Calculate Semantic Version
         id: semantic_version
         uses: PaulHatch/semantic-version@v5.4.0
@@ -38,7 +49,7 @@ jobs:
           branch: "main"
           tag_prefix: "v"
           version_format: "${major}.${minor}.${patch}"
-          tag_and_push: true # Opretter automatisk git tag
+          tag_and_push: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -62,10 +73,11 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/protect-transcription
           tags: |
             type=ref,event=branch
-            # Bruger outputtet fra semantic_version trinnet ovenfor
             type=semver,pattern={{version}},value=${{ steps.semantic_version.outputs.version }}
             type=sha,format=long
 
+      # TRIN 2: Byg og Push
+      # Her bruger vi GitHubs interne cache til Docker layers
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -74,6 +86,17 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # OPTIMERING: Bruger GitHub Actions egen cache (meget hurtigere)
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha # Hent cache fra GitHub
+          cache-to: type=gha,mode=max # Gem ny cache til GitHub
+
+      # TRIN 3: Tjek indpakningen (Final Image)
+      # Igen, brug cachen så vi ikke henter DB forfra
+      - name: Run Trivy vulnerability scanner (Image)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/protect-transcription:${{ steps.semantic_version.outputs.version }}
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+          cache-dir: .trivy # <--- VIGTIGT: Brug cachen
