@@ -1020,6 +1020,7 @@ async def sync_speech_events(
         events_queued = 0
         events_skipped = 0
         errors = []
+        speech_events_found = 0
         
         # Try to get events using the get_events method
         try:
@@ -1029,6 +1030,13 @@ async def sync_speech_events(
                 end=end_time,
             )
             
+            # Debug: log first few events to understand structure
+            for i, event in enumerate(events):
+                if i < 5:
+                    smart_types = getattr(event, 'smart_detect_types', None)
+                    event_type = getattr(event, 'type', None)
+                    logger.info(f"DEBUG Event {i}: type={event_type}, smart_detect_types={smart_types}, repr={repr(smart_types)}")
+            
             for event in events:
                 events_found += 1
                 
@@ -1037,12 +1045,23 @@ async def sync_speech_events(
                 if smart_detect_types is None:
                     continue
                 
-                # Convert to list of strings for comparison
-                smart_types_str = [str(t).lower() for t in smart_detect_types]
+                # Convert to list of strings for comparison - handle enums
+                smart_types_str = []
+                for t in smart_detect_types:
+                    # Handle both enum values and strings
+                    if hasattr(t, 'value'):
+                        smart_types_str.append(str(t.value).lower())
+                    elif hasattr(t, 'name'):
+                        smart_types_str.append(str(t.name).lower())
+                    else:
+                        smart_types_str.append(str(t).lower())
                 
                 # Only process speech events
-                if 'speech' not in smart_types_str and 'speechdetect' not in smart_types_str:
+                is_speech = any(s in ['speech', 'speechdetect', 'audio'] for s in smart_types_str)
+                if not is_speech:
                     continue
+                
+                speech_events_found += 1
                 
                 event_id = str(event.id)
                 
@@ -1099,6 +1118,7 @@ async def sync_speech_events(
             "status": "completed",
             "hours_searched": hours,
             "events_found": events_found,
+            "speech_events_found": speech_events_found,
             "events_queued": events_queued,
             "events_skipped": events_skipped,
             "message": f"Queued {events_queued} new events for transcription"
