@@ -834,14 +834,19 @@
                         
                         <!-- Sync Result -->
                         <div x-show="syncResult" class="text-sm">
-                            <template x-if="syncResult?.status === 'completed'">
+                            <template x-if="syncResult?.status === 'completed' || syncResult?.status === 'completed_with_errors'">
                                 <div class="bg-green-50 border border-green-200 rounded-lg p-3 text-green-800">
                                     <i class="fas fa-check-circle mr-1"></i>
                                     <span x-text="syncResult.message"></span>
                                     <div class="mt-1 text-xs text-green-600">
-                                        Found <span x-text="syncResult.events_found"></span> events,
+                                        Found <span x-text="syncResult.events_found"></span> total events,
+                                        <span x-text="syncResult.speech_events_found || 0"></span> speech events,
                                         queued <span x-text="syncResult.events_queued"></span> new,
                                         skipped <span x-text="syncResult.events_skipped"></span> existing
+                                    </div>
+                                    <div x-show="syncResult.errors" class="mt-2 text-xs text-yellow-700">
+                                        <i class="fas fa-exclamation-triangle mr-1"></i>
+                                        <span x-text="syncResult.errors?.join(', ')"></span>
                                     </div>
                                 </div>
                             </template>
