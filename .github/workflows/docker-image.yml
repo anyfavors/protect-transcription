@@ -6,19 +6,23 @@ on:
     tags: [ 'v*' ]
   workflow_dispatch:
 
+# VIGTIGT: Giver lov til at oprette tags og pushe images
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Nødvendig for at beregne versionshistorik
 
-      # Run vulnerability scan on the filesystem BEFORE building to save time
-      - name: Run Trivy vulnerability scanner (Repo scan)
+      # Hurtig sikkerhedsscan af filerne (før build)
+      - name: Run Trivy vulnerability scanner (Filesystem)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
@@ -26,10 +30,20 @@ jobs:
           format: 'table'
           exit-code: '0'
 
+      # FIX: Beregner versionsnummeret baseret på commits
+      - name: Calculate Semantic Version
+        id: semantic_version
+        uses: PaulHatch/semantic-version@v5.4.0
+        with:
+          branch: "main"
+          tag_prefix: "v"
+          version_format: "${major}.${minor}.${patch}"
+          tag_and_push: true # Opretter automatisk git tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
-        with:
-          platforms: linux/amd64,linux/arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -48,7 +62,8 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/protect-transcription
           tags: |
             type=ref,event=branch
-            type=semver,pattern={{version}}
+            # Bruger outputtet fra semantic_version trinnet ovenfor
+            type=semver,pattern={{version}},value=${{ steps.semantic_version.outputs.version }}
             type=sha,format=long
 
       - name: Build and push
@@ -59,6 +74,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # The key to fast builds: native GitHub Actions cache backend
+          # OPTIMERING: Bruger GitHub Actions egen cache (meget hurtigere)
           cache-from: type=gha
           cache-to: type=gha,mode=max
