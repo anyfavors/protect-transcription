@@ -12,7 +12,8 @@ jinja2>=3.1.2
 httpx>=0.26.0
 
 # UniFi Protect API
-uiprotect>=10.2.3
+# Pinned: 25.x removed ProtectApiClient.get_events (used by sync). 10.5.0 is what runs in prod.
+uiprotect==10.5.0
 
 # Pydantic for data validation
 pydantic>=2.5.0

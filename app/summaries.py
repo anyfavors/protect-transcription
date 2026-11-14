@@ -313,7 +313,7 @@ def _child_summaries(cursor: sqlite3.Cursor, period: str, period_key: str) -> li
 
 def _missing_children(cursor: sqlite3.Cursor, period: str, period_key: str) -> list[str]:
     """Child period keys that have transcriptions but no stored summary yet."""
-    child, expr = _ROLLUP_SOURCE[period]
+    child = _ROLLUP_SOURCE[period][0]
     child_expr = _PERIOD_EXPR[child]
     cursor.execute(
         f"""
