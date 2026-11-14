@@ -12,23 +12,20 @@ from app.config import DATABASE_PATH, OLLAMA_MODEL, OLLAMA_URL, PROTECT_HOST
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _DEFAULT_SETTINGS: dict[str, str] = {
     "whisper_model": "Systran/faster-whisper-large-v3",
     "language": "da",
+    # Clip = event start - buffer_before .. event END + buffer_after
     "buffer_before": "5",
-    "buffer_after": "60",
+    "buffer_after": "10",
     "vad_filter": "true",
-    "beam_size": "5",
     "protect_host": PROTECT_HOST,
     "ollama_url": OLLAMA_URL,
     "ollama_model": OLLAMA_MODEL,
-    "condition_on_previous_text": "false",
-    "no_speech_threshold": "0.6",
-    "compression_ratio_threshold": "2.4",
-    # Speaker diarization (requires speaches server support)
-    "enable_diarization": "false",
+    # Language the AI summaries are written in (free text, passed to the LLM)
+    "summary_language": "English",
     # Noise / silence pre-filter: minimum RMS energy (0-1 normalised)
     "min_audio_energy": "0.005",
     # Audio compression: compress WAV to Opus/OGG after N days (0 = disabled)
@@ -173,9 +170,40 @@ def init_database() -> None:
     # ── Migrations ──────────────────────────────────────────────────────────
     cur.execute("PRAGMA table_info(transcriptions)")
     columns = [col[1] for col in cur.fetchall()]
-    if "segments" not in columns:
-        logger.info("Migrating database: adding segments column")
-        cur.execute("ALTER TABLE transcriptions ADD COLUMN segments TEXT")
+    for name, ddl in (
+        ("segments", "TEXT"),
+        # Resolved end of the Protect event (local ISO); clip = start-before .. end+after
+        ("event_end", "TEXT"),
+        # Automatic retry bookkeeping for transient failures / waiting for event end
+        ("attempts", "INTEGER DEFAULT 0"),
+        ("next_attempt_at", "TEXT"),  # UTC 'YYYY-MM-DDTHH:MM:SS'; NULL = ready now
+        # 1 = re-download audio from the NVR (fall back to cached file if gone)
+        ("refetch", "INTEGER DEFAULT 0"),
+    ):
+        if name not in columns:
+            logger.info("Migrating database: adding transcriptions.%s", name)
+            cur.execute(f"ALTER TABLE transcriptions ADD COLUMN {name} {ddl}")
+
+    cur.execute("PRAGMA table_info(summaries)")
+    if "source_hash" not in [col[1] for col in cur.fetchall()]:
+        logger.info("Migrating database: adding summaries.source_hash")
+        cur.execute("ALTER TABLE summaries ADD COLUMN source_hash TEXT")
+
+    # Rows queued while the Protect bootstrap was unavailable got "Unknown (<MAC>)"
+    # names. Borrow the real name from another row with the same camera_id.
+    cur.execute("""
+        UPDATE transcriptions SET camera_name = (
+            SELECT t.camera_name FROM transcriptions t
+            WHERE t.camera_id = transcriptions.camera_id AND t.camera_name NOT LIKE 'Unknown (%'
+            LIMIT 1
+        )
+        WHERE camera_name LIKE 'Unknown (%' AND EXISTS (
+            SELECT 1 FROM transcriptions t
+            WHERE t.camera_id = transcriptions.camera_id AND t.camera_name NOT LIKE 'Unknown (%'
+        )
+    """)
+    if cur.rowcount:
+        logger.info("Backfilled camera names on %d rows", cur.rowcount)
 
     current_version = _user_version(cur)
     if current_version < SCHEMA_VERSION:
@@ -183,6 +211,14 @@ def init_database() -> None:
         # FTS rebuild only when version bumps (or first run)
         with contextlib.suppress(sqlite3.OperationalError):
             cur.execute("INSERT INTO transcriptions_fts(transcriptions_fts) VALUES('rebuild')")
+        if 0 < current_version < 3:
+            # buffer_after used to be measured from the event START (so it had to
+            # be large); it is now measured from the event END.
+            cur.execute(
+                "UPDATE settings SET value='10' WHERE key='buffer_after' AND CAST(value AS INT) > 60"
+            )
+            if cur.rowcount:
+                logger.info("buffer_after now counts from event end; reset to 10s")
         _set_user_version(cur, SCHEMA_VERSION)
 
     conn.commit()

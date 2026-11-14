@@ -2,14 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app import summaries as summary_service
 from app.auth import require_api_token
+from app.summaries import PERIODS
 
 router = APIRouter()
 
 
 @router.get("/api/summaries")
 async def get_summaries(period: str = Query("daily")):
-    if period not in ("daily", "weekly", "monthly"):
-        raise HTTPException(status_code=400, detail="period must be daily, weekly, or monthly")
+    if period not in PERIODS:
+        raise HTTPException(status_code=400, detail=f"period must be one of {', '.join(PERIODS)}")
     return summary_service.get_summaries(period)
 
 
@@ -19,8 +20,10 @@ async def generate_summary(request: Request):
     period = data.get("period_type", "daily")
     period_key = data.get("period_key", "")
 
-    if period not in ("daily", "weekly", "monthly"):
-        raise HTTPException(status_code=400, detail="period_type must be daily, weekly, or monthly")
+    if period not in PERIODS:
+        raise HTTPException(
+            status_code=400, detail=f"period_type must be one of {', '.join(PERIODS)}"
+        )
     if not period_key:
         raise HTTPException(status_code=400, detail="period_key is required")
 

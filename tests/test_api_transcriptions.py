@@ -244,11 +244,11 @@ def test_retranscribe_all_completed_only(client, tmp_db):
 
     conn = sqlite3.connect(tmp_db)
     cur = conn.cursor()
-    cur.execute("SELECT status, transcription FROM transcriptions WHERE event_id='c1'")
+    cur.execute("SELECT status, transcription, refetch FROM transcriptions WHERE event_id='c1'")
     row = cur.fetchone()
     conn.close()
-    assert row[0] == "pending"
-    assert row[1] is None
+    # Old text stays visible until the worker replaces it.
+    assert row == ("pending", "some text", 1)
 
 
 def test_retranscribe_all_include_errors(client, tmp_db):

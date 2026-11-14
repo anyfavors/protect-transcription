@@ -23,14 +23,10 @@ _ALLOWED_KEYS = {
     "buffer_before",
     "buffer_after",
     "vad_filter",
-    "beam_size",
     "protect_host",
     "ollama_url",
     "ollama_model",
-    "condition_on_previous_text",
-    "no_speech_threshold",
-    "compression_ratio_threshold",
-    "enable_diarization",
+    "summary_language",
     "min_audio_energy",
     "audio_compression_days",
     "auto_sync_hours",
@@ -42,15 +38,12 @@ _ALLOWED_KEYS = {
 
 _BOOL_KEYS = {
     "vad_filter",
-    "condition_on_previous_text",
-    "enable_diarization",
     "protect_verify_ssl",
 }
 
 _INT_BOUNDS = {
     "buffer_before": (1, 60),
     "buffer_after": (1, 600),
-    "beam_size": (1, 10),
     "audio_compression_days": (0, 365),
     "auto_sync_hours": (1, 720),
     "auto_sync_interval_minutes": (5, 1440),

@@ -335,7 +335,8 @@ def _retry_one_in_txn(cur: sqlite3.Cursor, row: sqlite3.Row) -> tuple[str, str, 
         """
         UPDATE transcriptions
         SET status='pending',
-            transcription=NULL, segments=NULL, confidence=NULL, duration_seconds=NULL
+            transcription=NULL, segments=NULL, confidence=NULL, duration_seconds=NULL,
+            attempts=0, next_attempt_at=NULL
         WHERE id=?
         """,
         (row["id"],),
@@ -406,8 +407,13 @@ async def retry_all_errors():
 async def retranscribe_all(request: Request):
     request_body = await request.json()
     include_errors: bool = request_body.get("include_errors", True)
+    # Re-download audio from the NVR using the exact event window; rows whose
+    # footage is gone fall back to the cached audio file.
+    refetch: bool = request_body.get("refetch", True)
 
-    statuses: tuple[str, ...] = ("completed", "error") if include_errors else ("completed",)
+    statuses: tuple[str, ...] = (
+        ("completed", "error", "filtered") if include_errors else ("completed",)
+    )
     placeholders = ",".join("?" for _ in statuses)
 
     conn = get_connection()
@@ -416,19 +422,19 @@ async def retranscribe_all(request: Request):
         cursor.execute(
             f"""
             UPDATE transcriptions
-            SET status='pending',
-                transcription=NULL, segments=NULL, language=NULL,
-                confidence=NULL, duration_seconds=NULL
+            SET status='pending', attempts=0, next_attempt_at=NULL, refetch=?
             WHERE status IN ({placeholders})
             """,
-            statuses,
+            (int(refetch), *statuses),
         )
         count = cursor.rowcount
         conn.commit()
     finally:
         conn.close()
 
-    audit("retranscribe_all", {"include_errors": include_errors, "count": count})
+    audit(
+        "retranscribe_all", {"include_errors": include_errors, "refetch": refetch, "count": count}
+    )
     return {"reset": count, "message": f"Queued {count} transcriptions for re-processing"}
 
 

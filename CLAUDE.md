@@ -27,10 +27,11 @@ app/routes/sync.py      ←── POST /api/sync (manual backfill)
       ▼
 SQLite  transcriptions  (status: pending → processing → completed/error)
       │
-      │  transcription_worker() polls every 5 s
+      │  transcription_worker() polls every 5 s (new events first, backlog newest-first)
       ▼
 app/worker.py
-      │  fetch_audio_clip()  →  uiprotect API  →  MP4 bytes
+      │  _event_window()     →  Protect get_event(): real start/end; defers while ongoing
+      │  fetch_audio_clip()  →  uiprotect API  →  MP4 bytes  (start-before .. end+after, ≤15 min)
       │  _extract_audio()    →  ffmpeg          →  WAV bytes
       │  transcribe_audio()  →  speaches        →  JSON result
       ▼
@@ -40,7 +41,11 @@ SQLite  (status = completed, transcription, segments, audio_file …)
 templates/index.html  +  static/app.js   (Alpine.js SPA)
 ```
 
-Key invariant: **audio WAV files are cached on disk**. `retranscribe-all` resets rows to `pending` but keeps `audio_file` set. The worker detects the cached file and skips the NVR fetch, so retranscription is fast and offline-capable.
+Key invariant: **audio is cached on disk** (WAV, compressed to OGG after N days — the worker decodes OGG back to WAV). `retranscribe-all` resets rows to `pending`, keeps `audio_file` and the old text, and sets `refetch=1`: the worker re-downloads the exact event window from the NVR and falls back to the cached file when the footage is gone.
+
+Row lifecycle columns: `attempts` / `next_attempt_at` (UTC `YYYY-MM-DDTHH:MM:SS`, compared as text against `strftime('now')`) implement deferral (event still ongoing, footage not written yet) and exponential-backoff retries of transient failures (NVR/speaches unreachable) — only after `_MAX_ATTEMPTS` does a row become `error`. `READY_SQL` in worker.py is the single definition of "can be processed now".
+
+Hallucinations: bad segments (compression ratio / no-speech) are dropped, a looping result is retried once at temperature 0.4, then loops are collapsed and the remaining text kept. Only pure junk becomes `filtered` ("Hallucination discarded: <raw>") — not `error`.
 
 ---
 
@@ -54,14 +59,14 @@ app/
   protect.py         Singleton uiprotect client with asyncio.Lock
   transcription.py   fetch_audio_clip(), _extract_audio(), transcribe_audio(), save_audio_file()
   worker.py          queue_transcription(), process_pending_transcription(), transcription_worker()
-  summaries.py       generate_summary() via Ollama
+  summaries.py       generate_summary() via Ollama (hierarchical daily/weekly/monthly/yearly)
   routes/
     health.py        GET /health
     webhook.py       POST /webhook
     sync.py          POST /api/sync
     transcriptions.py  All transcription CRUD + retranscribe-all
     settings.py      GET/PUT /api/settings, test-whisper, test-protect, speaches model endpoints
-    summaries.py     GET /api/summaries, POST /api/summaries/generate
+    summaries.py     GET /api/summaries, POST /api/summaries/generate (period: daily|weekly|monthly|yearly)
 
 static/
   app.js             Alpine.js transcribeApp() — all client-side logic
@@ -72,7 +77,7 @@ templates/
 
 tests/
   conftest.py        tmp_db fixture (patches get_connection), client fixture (no-op lifespan)
-  test_*.py          pytest-asyncio tests, 52 tests, ~47% coverage
+  test_*.py          pytest-asyncio tests
 ```
 
 ---
@@ -90,6 +95,13 @@ Models are discovered from the speaches registry (`GET /v1/registry?task=automat
 
 ### Tailwind CSS
 CSS is compiled in a **multi-stage Docker build**: a `node:22-slim` stage installs `tailwindcss` and `@tailwindcss/cli` via npm and runs `npx @tailwindcss/cli` to produce `static/app.css`, which is then copied into the final Python image. The standalone CLI binary is **not** used (it strips the theme). Configuration lives entirely in `app.css.src` — no `tailwind.config.js` (that's v3). Dark mode uses `@custom-variant dark (&:where(.dark, .dark *))` so `dark:` utilities activate when `.dark` is on any ancestor, persisted to `localStorage`.
+
+### Summaries are hierarchical
+daily ← transcripts (map-reduce chunked if over `_CHUNK_CHARS`), weekly/monthly ← daily summaries, yearly ← monthly summaries. Rollups generate missing child summaries first. Calls use Ollama's native `/api/chat` with `options.num_ctx` (the OpenAI-compat endpoint can't set it and silently truncates). Staleness is content-based: `summaries.source_hash` fingerprints the inputs (transcript texts for daily, child summary texts for rollups). `auto_summary_worker` waits until the transcription queue has been idle for 30 min (so a mass re-transcription settles first), then `run_rollups()` regenerates missing/stale summaries level by level — changes propagate day → week/month → year in one pass. Periods containing "now" are only included once a night after `auto_summary_time`.
+
+Timestamps are stored as local ISO strings with offset. Group by `substr(timestamp, ...)`, **never** `strftime(..., timestamp)` — SQLite converts to UTC and shifts late-night events to the previous day.
+
+Camera names are microphone *locations*, not speakers; the summary prompt says so explicitly.
 
 ### asyncio.Lock for Protect client
 `get_protect_client()` is called from the worker and from routes concurrently. The lock in `protect.py` ensures only one coroutine initialises the singleton at a time.
@@ -123,7 +135,9 @@ CSS is compiled in a **multi-stage Docker build**: a `node:22-slim` stage instal
 | List installed models | `GET /v1/models` |
 | Discover all registry models (ASR) | `GET /v1/registry?task=automatic-speech-recognition` |
 | Download a model | `POST /v1/models/{model_id}` (model ID is a path param, may contain `/`) |
-| Transcribe audio | `POST /v1/audio/transcriptions` (multipart, OpenAI-compatible) |
+| Transcribe audio | `POST /v1/audio/transcriptions` (multipart). Accepted fields: `model, language, prompt, response_format, temperature, timestamp_granularities, stream, hotwords, vad_filter` — anything else (e.g. `initial_prompt`, `condition_on_previous_text`, `beam_size`, `diarize`) is silently ignored. Check `GET /openapi.json` before adding a field. |
+
+Models live in the speaches PVC as a Hugging Face cache (`models--<org>--<name>/refs/main` + `snapshots/<rev>/`). The server has no internet egress, so non-hub models (e.g. `local/roest-v3-whisper-1.5b-ct2`, a CTranslate2 conversion of `CoRal-project/roest-v3-whisper-1.5b`) are converted elsewhere (`ct2-transformers-converter` with the **same ctranslate2 version as the server**) and copied in; the snapshot needs a README with `library_name: ctranslate2` and the `automatic-speech-recognition` tag or speaches rejects it. Do not send `prompt`: tested on real clips, the Danish fine-tunes echo it or invent text from it.
 
 When transcription returns 404 "not installed", the worker auto-triggers a download then retries. Download can take several minutes; the transcription request times out at 300 s, the download at 600 s.
 

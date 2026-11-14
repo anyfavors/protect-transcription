@@ -190,6 +190,10 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", out)
 
 
+# Earlier versions sent this as a prompt; Whisper models echo it back on
+# silence, so treat it as a hallucination if it ever shows up in output.
+_PROMPT = "Dette er en optagelse fra et overvågningskamera i et privat hjem."
+
 # Common Whisper hallucinations across Danish / English / German.
 # Stored normalized (lower-cased, no punctuation, single-spaced) so the
 # matcher can compare directly against normalised transcript text.
@@ -210,6 +214,8 @@ _HALLUCINATION_PHRASES = frozenset(
         # German
         "untertitel der amara.org-community",
         "untertitel von stephanie geiges",
+        # Echo of our own prompt
+        _PROMPT,
         # Generic
         "you",
         ".",
@@ -266,6 +272,58 @@ def _is_hallucination(text: str) -> bool:
             if repeats >= 4:
                 return True
     return False
+
+
+# faster-whisper's default thresholds. speaches doesn't let clients set them, so
+# they are applied per segment here: loops and noise segments are dropped
+# instead of throwing away the whole clip.
+_NO_SPEECH_PROB = 0.6
+_LOGPROB_FLOOR = -1.0
+_MAX_COMPRESSION = 2.4
+
+
+def _drop_bad_segments(result: dict) -> dict:
+    """Remove looping (high compression) or no-speech segments and rebuild the text."""
+    segments = result.get("segments") or []
+    keep = [
+        s
+        for s in segments
+        if not (
+            float(s.get("compression_ratio") or 0) > _MAX_COMPRESSION
+            or (
+                float(s.get("no_speech_prob") or 0) > _NO_SPEECH_PROB
+                and float(s.get("avg_logprob") or 0) < _LOGPROB_FLOOR
+            )
+        )
+    ]
+    if len(keep) == len(segments):
+        return result
+    logger.info("Dropped %d of %d bad segments", len(segments) - len(keep), len(segments))
+    text = " ".join(str(s.get("text") or "").strip() for s in keep).strip()
+    return {**result, "segments": keep, "text": text}
+
+
+def _collapse_repeats(text: str, min_repeats: int = 4) -> str:
+    """Collapse runs of the same 1-5 word phrase repeated *min_repeats*+ times to one copy."""
+    words = text.split()
+    norm = [_normalize(w) for w in words]
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        unit_len, end = 0, i + 1
+        for n in range(1, 6):
+            unit = norm[i : i + n]
+            if len(unit) < n:
+                break
+            j = i + n
+            while norm[j : j + n] == unit:
+                j += n
+            if (j - i) // n >= min_repeats:
+                unit_len, end = n, j
+                break
+        out.extend(words[i : i + unit_len] if unit_len else words[i : i + 1])
+        i = end
+    return " ".join(out)
 
 
 async def _post_with_5xx_retry(
@@ -356,86 +414,78 @@ async def _post_transcription(
 async def transcribe_audio(audio_data: bytes) -> dict:
     """
     Submit audio to the Whisper (speaches) server and return the parsed JSON.
-    Returns a dict with an 'error' key on failure.
 
-    On hallucination, retries once with stricter params before giving up.
+    Returns a dict with an 'error' key on failure, 'empty' when no speech was
+    found, or 'hallucination' (+ 'raw_text') when only looping/boilerplate
+    output remained after a retry and loop-collapsing.
     """
     settings = get_settings()
     model = settings.get("whisper_model", "Systran/faster-whisper-large-v3")
     language = settings.get("language", "da")
     vad_filter = settings.get("vad_filter", "true").lower() == "true"
-    condition_on_previous = settings.get("condition_on_previous_text", "false").lower() == "true"
-    no_speech_threshold = settings.get("no_speech_threshold", "0.6")
-    compression_ratio_threshold = settings.get("compression_ratio_threshold", "2.4")
 
-    enable_diarization = settings.get("enable_diarization", "false").lower() == "true"
-
+    # Only send fields speaches' /v1/audio/transcriptions form accepts
+    # (model, language, prompt, response_format, temperature, vad_filter, ...).
+    # Unknown fields are silently dropped by the server. No `prompt`: tested on
+    # real clips, the Danish fine-tunes echo it or invent text from it.
     base_data: dict = {
         "model": model,
-        "language": language,
         "response_format": "verbose_json",
         "temperature": "0.0",
-        "initial_prompt": (
-            "Dette er en optagelse fra et overvågningskamera i et privat hjem. "
-            "Samtalen er på dansk."
-        ),
-        "condition_on_previous_text": str(condition_on_previous).lower(),
-        "no_speech_threshold": no_speech_threshold,
-        "compression_ratio_threshold": compression_ratio_threshold,
+        "vad_filter": str(vad_filter).lower(),
     }
-    if vad_filter:
-        base_data["vad_filter"] = "true"
-    if enable_diarization:
-        base_data["diarize"] = "true"
+    if language and language != "auto":
+        base_data["language"] = language
 
     client = get_whisper_client()
     try:
-        logger.info(
-            "Transcribing model=%s lang=%s vad=%s condition_on_previous=%s",
-            model,
-            language,
-            vad_filter,
-            condition_on_previous,
-        )
+        logger.info("Transcribing model=%s lang=%s vad=%s", model, language, vad_filter)
 
         result = await _post_transcription(client, audio_data, model, base_data)
         if "error" in result:
             inc("transcription_errors_total")
             return result
 
+        result = _drop_bad_segments(result)
         text = (result.get("text") or "").strip()
         if not text:
             logger.info("Transcription returned empty text; treating as silence")
             inc("transcriptions_empty_total")
             return {"empty": True, **result, "text": ""}
 
-        if _is_hallucination(text):
-            logger.warning("Hallucination detected, retrying with stricter params: %r", text[:120])
-            inc("hallucinations_detected_total")
-            strict_data = dict(base_data)
-            strict_data["condition_on_previous_text"] = "false"
-            strict_data["no_speech_threshold"] = "0.8"
-            strict_data["compression_ratio_threshold"] = "1.8"
-            strict_data["temperature"] = "0.2"
+        if not _is_hallucination(text):
+            inc("transcriptions_succeeded_total")
+            logger.info("Transcription: %s...", text[:100])
+            return result
 
-            retry = await _post_transcription(client, audio_data, model, strict_data)
-            if "error" in retry:
-                inc("transcription_errors_total")
-                return retry
-            retry_text = retry.get("text", "")
-            if _is_hallucination(retry_text):
-                logger.warning(
-                    "Hallucination persisted after retry, discarding: %r", retry_text[:120]
-                )
-                inc("hallucinations_persisted_total")
-                return {"error": "hallucination_detected", "raw_text": retry_text}
+        logger.warning("Hallucination detected, retrying: %r", text[:120])
+        inc("hallucinations_detected_total")
+        # speaches passes a single temperature (no fallback ladder), so retry
+        # once with some sampling temperature to break the repetition.
+        strict_data = {**base_data, "temperature": "0.4"}
+        retry = await _post_transcription(client, audio_data, model, strict_data)
+        if "error" in retry:
+            inc("transcription_errors_total")
+            return retry
+        retry = _drop_bad_segments(retry)
+        retry_text = (retry.get("text") or "").strip()
+        if retry_text and not _is_hallucination(retry_text):
             inc("hallucination_retry_succeeded_total")
             logger.info("Retry succeeded: %s...", retry_text[:100])
             return retry
 
-        inc("transcriptions_succeeded_total")
-        logger.info("Transcription: %s...", text[:100])
-        return result
+        # Still looping: keep whatever real speech is left once the loops are
+        # collapsed, rather than discarding the whole clip.
+        for candidate, res in ((retry_text, retry), (text, result)):
+            cleaned = _collapse_repeats(candidate)
+            if len(cleaned.split()) >= 3 and not _is_hallucination(cleaned):
+                inc("hallucination_cleaned_total")
+                logger.info("Kept text after collapsing loops: %s...", cleaned[:100])
+                return {**res, "text": cleaned, "segments": []}
+
+        inc("hallucinations_persisted_total")
+        logger.warning("Hallucination persisted after retry, discarding: %r", retry_text[:120])
+        return {"hallucination": True, "raw_text": retry_text or text}
 
     except Exception as exc:
         inc("transcription_errors_total")

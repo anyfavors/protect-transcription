@@ -7,14 +7,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sqlite3
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 
 from app.config import AUDIO_PATH, DATABASE_PATH, LOCAL_TZ
 from app.database import get_settings, reset_stuck_processing
 from app.metrics import inc, set_gauge
+from app.protect import get_protect_client
 from app.transcription import (
+    _extract_audio,
     compute_audio_rms,
     fetch_audio_clip,
     save_audio_file,
@@ -22,6 +25,12 @@ from app.transcription import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Rows the worker may pick up now (deferred / backing-off rows have a future next_attempt_at).
+READY_SQL = (
+    "status = 'pending' AND "
+    "(next_attempt_at IS NULL OR next_attempt_at <= strftime('%Y-%m-%dT%H:%M:%S', 'now'))"
+)
 
 
 def _open_conn() -> sqlite3.Connection:
@@ -72,6 +81,45 @@ def queue_transcription(
         conn.close()
 
 
+_PROTECT_EVENT_ID = re.compile(r"^[0-9a-f]{24}$")
+# Event length assumed when the event can't be looked up on the NVR.
+_FALLBACK_EVENT_SECONDS = 60
+# Stop waiting for an event that never reports an end.
+_MAX_EVENT_WAIT = timedelta(hours=1)
+# ponytail: hard cap on clip length; raise if long conversations get cut off.
+_MAX_CLIP_SECONDS = 900
+# Give the NVR time to finish writing footage before exporting it.
+_RECORDING_SETTLE_SECONDS = 15
+# Transient failures (NVR / speaches unreachable) are retried with backoff.
+_MAX_ATTEMPTS = 5
+_RETRY_BASE_MINUTES = 5
+
+
+def _parse_local(value: str) -> datetime:
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=LOCAL_TZ)
+
+
+def _utc_stamp(dt: datetime) -> str:
+    """Format for next_attempt_at; compares as text with strftime(..., 'now')."""
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+async def _event_window(row: dict, event_time: datetime) -> tuple[datetime, datetime | None]:
+    """(start, end) of the speech event. end is None while the event is still ongoing."""
+    if row.get("event_end"):
+        return event_time, _parse_local(row["event_end"])
+    if _PROTECT_EVENT_ID.match(row.get("event_id") or ""):
+        try:
+            client = await get_protect_client()
+            event = await client.get_event(row["event_id"])
+            end = event.end.astimezone(LOCAL_TZ) if event.end else None
+            return event.start.astimezone(LOCAL_TZ), end
+        except Exception as exc:
+            logger.warning("Could not look up event %s: %s", row["event_id"], exc)
+    return event_time, event_time + timedelta(seconds=_FALLBACK_EVENT_SECONDS)
+
+
 async def process_pending_transcription(row: dict) -> None:
     """Fetch audio, transcribe, and persist the result for one pending row."""
     event_id = row["event_id"]
@@ -79,197 +127,230 @@ async def process_pending_transcription(row: dict) -> None:
     camera_name = row["camera_name"]
     timestamp_str = row["timestamp"]
     record_id = row["id"]
+    attempts = int(row.get("attempts") or 0)
 
     settings = get_settings()
     buffer_before = int(settings.get("buffer_before", "5"))
-    buffer_after = int(settings.get("buffer_after", "60"))
+    buffer_after = int(settings.get("buffer_after", "10"))
 
     try:
-        event_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-        if event_time.tzinfo is None:
-            event_time = event_time.replace(tzinfo=LOCAL_TZ)
+        event_time = _parse_local(timestamp_str)
     except Exception as exc:
-        _mark_error(record_id, f"Invalid timestamp: {timestamp_str} ({exc})")
+        _set(record_id, status="error", transcription=f"Invalid timestamp: {timestamp_str} ({exc})")
         return
 
-    start_time = event_time - timedelta(seconds=buffer_before)
-    end_time = event_time + timedelta(seconds=buffer_after)
-
-    logger.info(
-        "Processing event %s from %s at %s (buffer -%ds +%ds)",
-        event_id,
-        camera_name,
-        event_time.isoformat(),
-        buffer_before,
-        buffer_after,
-    )
-
-    # Reuse cached audio file if it exists (e.g. retranscribe-all flow).
     existing_audio_file: str | None = row.get("audio_file")
     cached_path = Path(AUDIO_PATH) / existing_audio_file if existing_audio_file else None
+    has_cache = bool(cached_path and cached_path.exists())
+    need_fetch = not has_cache or bool(row.get("refetch"))
 
     audio_data: bytes | None = None
     audio_filename: str | None = None
-    if cached_path and cached_path.exists():
+    if need_fetch:
+        now = datetime.now(tz=LOCAL_TZ)
+        start, end = await _event_window(row, event_time)
+        if end is None:
+            if now - start < _MAX_EVENT_WAIT:
+                logger.info("Event %s still in progress; checking again in 60s", event_id)
+                _set(
+                    record_id,
+                    status="pending",
+                    next_attempt_at=_utc_stamp(now + timedelta(seconds=60)),
+                )
+                return
+            end = start + timedelta(seconds=_FALLBACK_EVENT_SECONDS)
+
+        clip_start = start - timedelta(seconds=buffer_before)
+        clip_end = min(
+            end + timedelta(seconds=buffer_after),
+            clip_start + timedelta(seconds=_MAX_CLIP_SECONDS),
+        )
+        ready_at = clip_end + timedelta(seconds=_RECORDING_SETTLE_SECONDS)
+        if ready_at > now:
+            logger.info("Event %s: waiting until %s for footage", event_id, ready_at.isoformat())
+            _set(record_id, status="pending", next_attempt_at=_utc_stamp(ready_at))
+            return
+
+        logger.info(
+            "Processing event %s from %s: clip %s → %s (%.0fs)",
+            event_id,
+            camera_name,
+            clip_start.isoformat(),
+            clip_end.isoformat(),
+            (clip_end - clip_start).total_seconds(),
+        )
+        fetched = await fetch_audio_clip(camera_id, clip_start, clip_end)
+        if fetched:
+            audio_data = fetched
+            audio_filename = save_audio_file(fetched, start, camera_name)
+            if cached_path and has_cache and audio_filename != existing_audio_file:
+                cached_path.unlink(missing_ok=True)
+            # Record the real event bounds (webhook timestamps are trigger times).
+            _set(record_id, timestamp=start.isoformat(), event_end=end.isoformat())
+            timestamp_str = start.isoformat()
+        elif not has_cache:
+            _retry_or_fail(record_id, attempts, "Failed to fetch audio", None)
+            await _broadcast_update(record_id, "error", camera_name, timestamp_str)
+            return
+        else:
+            logger.info("Re-fetch failed for event %s; using cached audio", event_id)
+
+    if audio_data is None:
+        assert cached_path is not None
         logger.info("Reusing cached audio file: %s", cached_path.name)
         audio_data = cached_path.read_bytes()
         audio_filename = existing_audio_file
-    else:
-        if existing_audio_file:
-            logger.warning(
-                "Cached audio file missing (%s), re-fetching from NVR", existing_audio_file
-            )
-        fetched = await fetch_audio_clip(camera_id, start_time, end_time)
-        if not fetched:
-            _mark_error(record_id, "Failed to fetch audio")
-            await _broadcast_update(record_id, "error", camera_name, timestamp_str)
-            return
-        audio_data = fetched
-        audio_filename = save_audio_file(audio_data, event_time, camera_name)
+        if not audio_data.startswith(b"RIFF"):
+            # Older clips are compressed to Opus/OGG; decode back to 16 kHz WAV.
+            audio_data = await _extract_audio(audio_data)
+            if not audio_data:
+                _retry_or_fail(
+                    record_id, attempts, "Failed to decode cached audio", existing_audio_file
+                )
+                return
+
+    duration = len(audio_data) / (16000 * 2)  # 16 kHz, 16-bit
 
     # ── Noise / silence pre-filter ──────────────────────────────
     min_energy = float(settings.get("min_audio_energy", "0.005"))
     if min_energy > 0:
         rms = compute_audio_rms(audio_data)
         if rms < min_energy:
-            duration = len(audio_data) / (16000 * 2)
-            logger.info(
-                "Audio filtered (RMS %.5f < %.5f) for event %s",
-                rms,
-                min_energy,
-                event_id,
-            )
+            logger.info("Audio filtered (RMS %.5f < %.5f) for event %s", rms, min_energy, event_id)
             inc("transcriptions_filtered_total")
-            _update_filtered(
+            _finish(
                 record_id,
+                "filtered",
                 f"Silence/noise detected (RMS energy {rms:.5f} below threshold {min_energy})",
-                audio_filename or "",
+                audio_filename,
                 duration,
             )
             await _broadcast_update(record_id, "filtered", camera_name, timestamp_str)
             return
 
     result = await transcribe_audio(audio_data)
-    duration = len(audio_data) / (16000 * 2)  # 16 kHz, 16-bit
 
     if "error" in result:
-        _update_error_with_audio(
-            record_id, f"Transcription error: {result['error']}", audio_filename
+        final_status = _retry_or_fail(
+            record_id, attempts, f"Transcription error: {result['error']}", audio_filename
         )
-        final_status = "error"
+    elif result.get("hallucination"):
+        inc("transcriptions_filtered_total")
+        _finish(
+            record_id,
+            "filtered",
+            f"Hallucination discarded: {str(result.get('raw_text') or '')[:300]}",
+            audio_filename,
+            duration,
+        )
+        final_status = "filtered"
     elif result.get("empty"):
         inc("transcriptions_filtered_total")
-        _update_filtered(
+        _finish(
             record_id,
+            "filtered",
             "Empty transcription (no speech detected by Whisper)",
-            audio_filename or "",
+            audio_filename,
             duration,
         )
         final_status = "filtered"
     else:
         segments = result.get("segments", [])
-        segments_json = json.dumps(segments) if segments else None
-        _update_completed(
+        _finish(
             record_id,
+            "completed",
             result.get("text", ""),
-            segments_json,
-            result.get("language", "da"),
-            result.get("confidence", 0),
-            audio_filename or "",
+            audio_filename,
             duration,
+            segments=json.dumps(segments) if segments else None,
+            language=result.get("language", "da"),
+            confidence=result.get("confidence", 0),
         )
         final_status = "completed"
 
-    logger.info("Completed event %s from %s", event_id, camera_name)
+    logger.info("Finished event %s from %s: %s", event_id, camera_name, final_status)
     await _broadcast_update(record_id, final_status, camera_name, timestamp_str)
 
 
-def _mark_error(record_id: int, message: str) -> None:
+def _set(record_id: int, **fields: object) -> None:
+    """UPDATE the given columns (names are code-controlled, never user input)."""
+    cols = ", ".join(f"{k}=?" for k in fields)
     conn = _open_conn()
     try:
-        conn.execute(
-            "UPDATE transcriptions SET status='error', transcription=? WHERE id=?",
-            (message[:500], record_id),
-        )
+        conn.execute(f"UPDATE transcriptions SET {cols} WHERE id=?", (*fields.values(), record_id))
         conn.commit()
     finally:
         conn.close()
 
 
-def _update_error_with_audio(record_id: int, message: str, audio_filename: str | None) -> None:
-    conn = _open_conn()
-    try:
-        conn.execute(
-            "UPDATE transcriptions SET status='error', transcription=?, audio_file=? WHERE id=?",
-            (message[:1000], audio_filename, record_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def _update_filtered(record_id: int, message: str, audio_filename: str, duration: float) -> None:
-    conn = _open_conn()
-    try:
-        conn.execute(
-            """
-            UPDATE transcriptions
-            SET status='filtered',
-                transcription=?,
-                audio_file=?,
-                duration_seconds=?
-            WHERE id=?
-            """,
-            (message, audio_filename, duration, record_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def _update_completed(
+def _finish(
     record_id: int,
+    status: str,
     text: str,
-    segments_json: str | None,
-    language: str,
-    confidence: float,
-    audio_filename: str,
+    audio_filename: str | None,
     duration: float,
+    **extra: object,
 ) -> None:
-    conn = _open_conn()
-    try:
-        conn.execute(
-            """
-            UPDATE transcriptions
-            SET status='completed',
-                transcription=?,
-                segments=?,
-                language=?,
-                confidence=?,
-                audio_file=?,
-                duration_seconds=?
-            WHERE id=?
-            """,
-            (text, segments_json, language, confidence, audio_filename, duration, record_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    """Store a final result and clear retry/refetch bookkeeping."""
+    _set(
+        record_id,
+        status=status,
+        transcription=text,
+        audio_file=audio_filename,
+        duration_seconds=duration,
+        attempts=0,
+        next_attempt_at=None,
+        refetch=0,
+        **extra,
+    )
+
+
+def _retry_or_fail(record_id: int, attempts: int, message: str, audio_filename: str | None) -> str:
+    """Re-queue a transient failure with exponential backoff, or mark it as error."""
+    attempts += 1
+    if attempts < _MAX_ATTEMPTS:
+        delay = timedelta(minutes=_RETRY_BASE_MINUTES * 2 ** (attempts - 1))
+        logger.warning("%s (attempt %d); retrying in %s", message, attempts, delay)
+        inc("transcription_retries_total")
+        fields: dict[str, object] = {
+            "status": "pending",
+            "attempts": attempts,
+            "next_attempt_at": _utc_stamp(datetime.now(tz=LOCAL_TZ) + delay),
+        }
+        if audio_filename:
+            fields["audio_file"] = audio_filename
+        _set(record_id, **fields)
+        return "pending"
+    _set(
+        record_id,
+        status="error",
+        transcription=message[:1000],
+        audio_file=audio_filename,
+        attempts=attempts,
+        next_attempt_at=None,
+        refetch=0,
+    )
+    return "error"
 
 
 async def _claim_next_pending() -> dict | None:
-    """Atomically claim the next pending row and return it as a dict."""
+    """Atomically claim the next ready pending row and return it as a dict.
+
+    New events (no audio yet) go first so a mass re-transcription doesn't
+    delay live ones; the backlog is worked newest-first.
+    """
     conn = _open_conn()
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
         cur.execute(
-            """
-            SELECT id, event_id, camera_id, camera_name, timestamp, language, audio_file
+            f"""
+            SELECT id, event_id, camera_id, camera_name, timestamp, language, audio_file,
+                   event_end, attempts, refetch
             FROM transcriptions
-            WHERE status = 'pending'
-            ORDER BY timestamp ASC
+            WHERE {READY_SQL}
+            ORDER BY (audio_file IS NOT NULL), timestamp DESC
             LIMIT 1
             """
         )
@@ -488,17 +569,6 @@ async def auto_sync_worker() -> None:
             await asyncio.sleep(300)
 
 
-def _seconds_until_next(target: time) -> float:
-    """Seconds from now until the next occurrence of *target* in LOCAL_TZ."""
-    now = datetime.now(tz=LOCAL_TZ)
-    today_target = now.replace(
-        hour=target.hour, minute=target.minute, second=target.second, microsecond=0
-    )
-    if today_target <= now:
-        today_target += timedelta(days=1)
-    return (today_target - now).total_seconds()
-
-
 def _parse_hhmm(value: str, default: time) -> time:
     try:
         h, m = value.split(":", 1)
@@ -507,74 +577,106 @@ def _parse_hhmm(value: str, default: time) -> time:
         return default
 
 
-async def _generate_daily_summary_safe(date_key: str) -> bool:
-    """Generate the daily summary for *date_key*; swallow 404 (no transcripts)."""
+async def _generate_summary_safe(period: str, key: str) -> bool:
+    """Generate one summary; log and swallow failures (no transcripts / Ollama down)."""
     from app.summaries import generate_summary
 
     try:
-        await generate_summary("daily", date_key)
+        await generate_summary(period, key)
         inc("summaries_generated_total")
         return True
-    except Exception as exc:  # 404 / Ollama down / etc
-        logger.info("Auto-summary skipped for %s: %s", date_key, exc)
+    except Exception as exc:
+        logger.info("Auto-summary skipped for %s %s: %s", period, key, exc)
         return False
 
 
-async def _summary_catchup() -> None:
+async def run_rollups(include_current: bool = True) -> int:
     """
-    On startup, generate any missing daily summaries from the last 7 days.
+    Regenerate every summary that is missing or whose inputs changed.
 
-    Skips days where a summary already exists with a matching transcription
-    count (i.e. not stale).
+    Levels run in dependency order (daily → weekly/monthly → yearly), so a
+    changed transcript refreshes its day, and the new day summary in turn
+    makes its week/month stale in the same pass, and so on up to the year.
+    Periods containing "now" are only touched when *include_current* is set
+    (the nightly run), so the running day/week/month/year isn't rebuilt
+    after every new clip.
     """
-    from app.summaries import get_summaries
+    from app.summaries import PERIODS, current_keys, get_summaries
 
-    try:
-        existing = {item["period_key"]: item for item in get_summaries("daily").get("items", [])}
-    except Exception as exc:
-        logger.warning("Summary catch-up: failed to read existing summaries: %s", exc)
-        return
-
-    today = datetime.now(tz=LOCAL_TZ).date()
-    for delta in range(1, 8):  # yesterday .. 7 days ago
-        day = today - timedelta(days=delta)
-        key = day.strftime("%Y-%m-%d")
-        item = existing.get(key)
-        if item and item.get("summary") and not item.get("stale"):
+    current = current_keys()
+    generated = 0
+    for period in PERIODS:
+        try:
+            items = get_summaries(period, limit=None)["items"]
+        except Exception as exc:
+            logger.warning("Rollup: failed to read %s summaries: %s", period, exc)
             continue
-        if not item:
-            continue  # No transcripts for that day, skip
-        logger.info("Summary catch-up: generating missing daily summary for %s", key)
-        await _generate_daily_summary_safe(key)
+        for item in reversed(items):  # oldest first
+            key = item["period_key"]
+            if key == current[period] and not include_current:
+                continue
+            if item.get("summary") and not item.get("stale"):
+                continue
+            logger.info("Rollup: generating %s summary for %s", period, key)
+            if await _generate_summary_safe(period, key):
+                generated += 1
+    return generated
+
+
+def _queue_busy() -> bool:
+    """True while transcriptions are being processed or are ready to be."""
+    conn = _open_conn()
+    try:
+        cur = conn.execute(
+            f"SELECT EXISTS(SELECT 1 FROM transcriptions WHERE status='processing' OR ({READY_SQL}))"
+        )
+        return bool(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+
+_ROLLUP_CHECK_SECONDS = 300
+# Wait until the transcription queue has been empty this long before
+# summarising, so a mass re-transcription settles before anything is rebuilt.
+_ROLLUP_QUIET = timedelta(minutes=30)
 
 
 async def auto_summary_worker() -> None:
-    """Generate the daily summary every night at the configured local time."""
-    default_target = time(hour=23, minute=55)
+    """
+    Keep summaries in sync with transcriptions.
 
-    # Catch up missing summaries from the last week (e.g. pod was offline at 23:55).
+    Every few minutes: if the transcription queue has been idle for
+    _ROLLUP_QUIET, regenerate summaries whose source content changed (closed
+    periods). Once a day after ``auto_summary_time`` the current periods are
+    included too. Nothing is regenerated unless its inputs actually changed.
+    """
+    from app.summaries import backfill_source_hashes
+
     try:
-        await _summary_catchup()
+        backfill_source_hashes()
     except Exception as exc:
-        logger.exception("Summary catch-up failed: %s", exc)
+        logger.exception("Summary hash backfill failed: %s", exc)
 
+    quiet_since: datetime | None = None
+    last_nightly = None
     while True:
         try:
-            settings = get_settings()
-            target = _parse_hhmm(settings.get("auto_summary_time", "23:55"), default_target)
+            await asyncio.sleep(_ROLLUP_CHECK_SECONDS)
+            now = datetime.now(tz=LOCAL_TZ)
+            if _queue_busy():
+                quiet_since = None
+                continue
+            quiet_since = quiet_since or now
+            if now - quiet_since < _ROLLUP_QUIET:
+                continue
 
-            delay = _seconds_until_next(target)
-            logger.info(
-                "Auto-summary sleeping %.0fs until %s local", delay, target.strftime("%H:%M")
-            )
-            await asyncio.sleep(delay)
-
-            today_key = datetime.now(tz=LOCAL_TZ).strftime("%Y-%m-%d")
-            if await _generate_daily_summary_safe(today_key):
-                logger.info("Auto-summary generated for %s", today_key)
-
-            # Avoid tight loop if clock jumps backwards.
-            await asyncio.sleep(60)
+            target = _parse_hhmm(get_settings().get("auto_summary_time", "23:55"), time(23, 55))
+            nightly = now.time() >= target and last_nightly != now.date()
+            count = await run_rollups(include_current=nightly)
+            if nightly:
+                last_nightly = now.date()
+            if count:
+                logger.info("Rollup pass generated %d summaries (nightly=%s)", count, nightly)
 
         except asyncio.CancelledError:
             raise

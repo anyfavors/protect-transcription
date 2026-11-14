@@ -182,16 +182,16 @@ def test_metrics_includes_uptime(client):
 
 
 @pytest.mark.asyncio
-async def test_summary_catchup_skips_when_no_transcripts(monkeypatch, tmp_db):
+async def test_rollups_skip_when_no_transcripts(monkeypatch, tmp_db):
     from app import worker as wk
 
-    # No transcripts in DB → catchup must not call generate
+    # No transcripts in DB → rollups must not call generate
     called = []
 
-    async def fake_gen(date_key: str) -> bool:
-        called.append(date_key)
+    async def fake_gen(period: str, key: str) -> bool:
+        called.append((period, key))
         return True
 
-    monkeypatch.setattr(wk, "_generate_daily_summary_safe", fake_gen)
-    await wk._summary_catchup()
+    monkeypatch.setattr(wk, "_generate_summary_safe", fake_gen)
+    await wk.run_rollups()
     assert called == []

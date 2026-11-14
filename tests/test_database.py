@@ -33,7 +33,8 @@ def test_default_settings_populated(tmp_db):
     assert "language" in settings
     assert settings["language"] == "da"
     assert settings["vad_filter"] == "true"
-    assert settings["condition_on_previous_text"] == "false"
+    assert settings["summary_language"] == "English"
+    assert "beam_size" not in settings
 
 
 def test_save_and_retrieve_setting(tmp_db):
