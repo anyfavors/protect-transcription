@@ -38,6 +38,14 @@ def test_drop_bad_segments_rebuilds_text():
     assert len(out["segments"]) == 1
 
 
+def test_text_rebuilt_with_spaces_between_segments():
+    result = {
+        "text": "mobiltelefonenDu var",
+        "segments": [{"text": "mobiltelefonen"}, {"text": "Du var"}],
+    }
+    assert tr._drop_bad_segments(result)["text"] == "mobiltelefonen Du var"
+
+
 # ── transcribe_audio against a fake speaches ────────────────────────────────
 
 

@@ -283,7 +283,7 @@ _MAX_COMPRESSION = 2.4
 
 
 def _drop_bad_segments(result: dict) -> dict:
-    """Remove looping (high compression) or no-speech segments and rebuild the text."""
+    """Remove looping (high compression) or no-speech segments; rebuild text from segments."""
     segments = result.get("segments") or []
     keep = [
         s
@@ -296,10 +296,13 @@ def _drop_bad_segments(result: dict) -> dict:
             )
         )
     ]
-    if len(keep) == len(segments):
+    if not segments:
         return result
-    logger.info("Dropped %d of %d bad segments", len(segments) - len(keep), len(segments))
-    text = " ".join(str(s.get("text") or "").strip() for s in keep).strip()
+    if len(keep) < len(segments):
+        logger.info("Dropped %d of %d bad segments", len(segments) - len(keep), len(segments))
+    # Always rebuild from segments: speaches' batched mode concatenates chunk
+    # texts without a separator ("mobiltelefonenDu").
+    text = " ".join(t for s in keep if (t := str(s.get("text") or "").strip()))
     return {**result, "segments": keep, "text": text}
 
 
