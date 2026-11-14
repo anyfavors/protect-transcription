@@ -21,6 +21,49 @@ from app.summaries import _ollama
 logger = logging.getLogger(__name__)
 
 _MAX_SOURCES = 40
+
+# Words about talking itself match everything and drown out the real topic.
+_GENERIC = frozenset(
+    [
+        "conversation",
+        "conversations",
+        "talk",
+        "talked",
+        "talking",
+        "said",
+        "say",
+        "says",
+        "speech",
+        "discuss",
+        "discussed",
+        "samtale",
+        "samtaler",
+        "tale",
+        "taler",
+        "snak",
+        "snakke",
+        "snakket",
+        "sagt",
+        "sige",
+        "siger",
+        "sag",
+        "sprog",
+        "ord",
+        "emne",
+        "hvad",
+        "hvornår",
+        "hvem",
+        "hvor",
+        "hvordan",
+        "what",
+        "when",
+        "who",
+        "where",
+        "how",
+    ]
+)
+# ponytail: crude language guess for the answer; swap for the LLM's own detection if wrong often.
+_DANISH_HINT = re.compile(r"[æøå]|\b(hvad|hvornår|hvem|hvor|hvordan|vi|om|det|har|der)\b", re.I)
 _MAX_CHARS_PER_SOURCE = 500
 
 
@@ -62,13 +105,19 @@ async def ask(question: str) -> dict:
     raw = await _ollama(
         "You turn questions about a Danish household's recorded conversations into "
         "full-text search words.",
-        "Give 4-10 short search words (single words, no phrases) that would appear in "
-        "Danish transcripts answering this question. Include Danish words, and English "
-        "ones if the question is English. Use word stems (e.g. 'dyrlæge' not "
-        "'dyrlægen'). Reply with the words only, comma-separated.\n\n"
+        "Give 3-8 search words for the TOPIC of this question, as they would be spoken in "
+        "Danish (add the English word too if people might say it in English). Only "
+        "content words (things, people, places, activities). Never words about talking "
+        "itself (like conversation, talk, samtale, snak). Use word stems, e.g. 'dyrlæge' "
+        "not 'dyrlægen', 'hund' not 'hunden'. Reply with the words only, comma-separated."
+        "\n\n"
         f"Question: {question}",
     )
-    words = [w.strip() for w in re.split(r"[,\n]", raw) if 1 < len(w.strip()) < 40][:12]
+    words = [
+        w.strip().lower()
+        for w in re.split(r"[,\n]", raw)
+        if 1 < len(w.strip()) < 40 and w.strip().lower() not in _GENERIC
+    ][:10]
     sources = find_sources(words)
     if not sources:
         return {"answer": None, "keywords": words, "sources": []}
@@ -84,9 +133,11 @@ async def ask(question: str) -> dict:
         "around a private home. Camera names (Indgang, Forhaven, ...) are locations, "
         "not people. Transcripts are automatic, mostly Danish, and contain errors. "
         "Answer only from the clips given. Cite every claim with the clip id in square "
-        "brackets, like [#123]. If the clips don't answer the question, say so plainly. "
-        "Answer in the language of the question, briefly.",
-        f"Question: {question}\n\nClips:\n" + "\n".join(lines),
+        "brackets, like [#123]. Mention when things were said (date and time). If the "
+        "clips don't answer the question, say so plainly. Be brief.",
+        f"Question: {question}\n\nClips:\n"
+        + "\n".join(lines)
+        + f"\n\nAnswer the question in {'Danish' if _DANISH_HINT.search(question) else 'English'}.",
     )
     for s in sources:
         s["transcription"] = str(s["transcription"])[:300]
