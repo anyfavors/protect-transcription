@@ -1,0 +1,49 @@
+<!-- Toasts -->
+<div class="fixed z-50 bottom-20 lg:bottom-5 right-4 left-4 sm:left-auto flex flex-col gap-2 items-end pointer-events-none" aria-live="polite">
+    <template x-for="t in $store.ui.toasts" :key="t.id">
+        <div class="pointer-events-auto max-w-sm rounded-lg px-4 py-2.5 text-sm shadow-lg border"
+            :class="t.kind === 'error' ? 'bg-orange-50 border-orange-200 text-orange-900 dark:bg-orange-950 dark:border-orange-900 dark:text-orange-100'
+                  : t.kind === 'success' ? 'bg-white border-teal-200 text-slate-800 dark:bg-slate-900 dark:border-teal-900 dark:text-slate-100'
+                  : 'bg-white border-slate-200 text-slate-800 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-100'"
+            x-text="t.message"></div>
+    </template>
+</div>
+
+<!-- Confirm dialog -->
+<template x-if="$store.ui.confirmBox">
+    <div class="fixed inset-0 z-50 grid place-items-center p-4 bg-slate-950/50" @click.self="$store.ui.closeConfirm(false)">
+        <div class="card w-full max-w-md p-5 flex flex-col gap-3" role="alertdialog" aria-modal="true" :aria-label="$store.ui.confirmBox.title"
+            x-init="$nextTick(() => $el.querySelector('input, .btn-primary, .btn-danger')?.focus())">
+            <h2 class="text-lg font-semibold" x-text="$store.ui.confirmBox.title"></h2>
+            <p class="text-sm text-slate-600 dark:text-slate-300" x-text="$store.ui.confirmBox.message"></p>
+            <template x-if="$store.ui.confirmBox.typed">
+                <label class="text-sm flex flex-col gap-1">
+                    <span>Type <strong x-text="$store.ui.confirmBox.typed"></strong> to confirm</span>
+                    <input type="text" class="field font-mono" x-model="$store.ui.confirmBox.input" autocomplete="off">
+                </label>
+            </template>
+            <div class="flex justify-end gap-2 pt-2">
+                <button type="button" class="btn" @click="$store.ui.closeConfirm(false)">Cancel</button>
+                <button type="button" class="btn" :class="$store.ui.confirmBox.danger ? 'btn-danger-solid' : 'btn-primary'"
+                    :disabled="$store.ui.confirmBox.typed && $store.ui.confirmBox.input !== $store.ui.confirmBox.typed"
+                    @click="$store.ui.closeConfirm(true)" x-text="$store.ui.confirmBox.action"></button>
+            </div>
+        </div>
+    </div>
+</template>
+
+<!-- Keyboard shortcuts -->
+<div x-data="{ show: false }" @shortcut:help.window="show = !show" @keydown.escape.window="show = false">
+    <template x-if="show">
+        <div class="fixed inset-0 z-50 grid place-items-center p-4 bg-slate-950/50" @click.self="show = false">
+            <div class="card w-full max-w-sm p-5" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+                <h2 class="font-semibold mb-3">Keyboard shortcuts</h2>
+                <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
+                    {% for keys, what in [('j / k','Next / previous clip'),('← / →','Previous / next day'),('space','Play or pause'),('s','Save (star) the open clip'),('e','Edit the transcript'),('/','Search'),('t','Go to today'),('Esc','Close'),('?','This list')] %}
+                    <dt><kbd class="kbd">{{ keys }}</kbd></dt><dd class="text-slate-600 dark:text-slate-300">{{ what }}</dd>
+                    {% endfor %}
+                </dl>
+            </div>
+        </div>
+    </template>
+</div>

@@ -10,7 +10,7 @@ IF YOU DO NOT KNOW SOMETHING, DONT PRETEND TO.
 
 ## What this project is
 
-A FastAPI service that listens for UniFi Protect smart-detection events (speech), pulls the video clip, extracts audio with ffmpeg, and sends it to a **speaches** server (faster-whisper) for transcription. Results are stored in SQLite and served through an Alpine.js + Tailwind CSS single-page UI.
+A FastAPI service that listens for UniFi Protect smart-detection events (speech), pulls the video clip, extracts audio with ffmpeg, and sends it to a **speaches** server (faster-whisper) for transcription. Results are stored in SQLite and served through an Alpine.js + Tailwind CSS single-page UI ("Talky"): Day timeline, Summaries, Search & Ask, Insights, System.
 
 ---
 
@@ -38,7 +38,7 @@ app/worker.py
 SQLite  (status = completed, transcription, segments, audio_file …)
       │
       ▼
-templates/index.html  +  static/app.js   (Alpine.js SPA)
+templates/ (Jinja partials)  +  static/js/ (ES modules, Alpine.js SPA)
 ```
 
 Key invariant: **audio is cached on disk** (WAV, compressed to OGG after N days — the worker decodes OGG back to WAV). `retranscribe-all` resets rows to `pending`, keeps `audio_file` and the old text, and sets `refetch=1`: the worker re-downloads the exact event window from the NVR and falls back to the cached file when the footage is gone.
@@ -69,11 +69,20 @@ app/
     summaries.py     GET /api/summaries, POST /api/summaries/generate (period: daily|weekly|monthly|yearly)
 
 static/
-  app.js             Alpine.js transcribeApp() — all client-side logic
-  app.css            Compiled Tailwind CSS (generated during Docker build — do NOT edit by hand)
+  js/main.js         Entry module: registers Alpine store, page components, $icon magic, keyboard shortcuts
+  js/store.js        $store.ui — hash routing (#/day/2026-11-14?clip=12), stats/health, WebSocket, toasts, confirm, theme
+  js/api.js          fetch wrappers + waitForJob() for background jobs
+  js/format.js       escaping, Markdown, local-time helpers (timestamps are read as wall-clock strings)
+  js/icons.js        Lucide icon subset (generated from lucide-static; add names there)
+  js/pages/*.js      One Alpine component per page + clip.js (detail panel with wavesurfer player)
+  vendor/            Self-hosted Alpine.js and wavesurfer.js (no CDNs)
+  manifest.webmanifest, icon*.{svg,png}   Installable web app
+  app.css            Compiled Tailwind CSS (generated during Docker build — do NOT edit by hand, gitignored)
 
 templates/
-  index.html         Single HTML shell; loads app.css + app.js
+  index.html         Shell: sidebar / bottom tabs, status strip, page includes
+  pages/*.html       day, summaries, search (incl. Ask), insights, system
+  partials/*.html    clip panel, dialogs (toasts, confirm, shortcuts), settings save bar
 
 tests/
   conftest.py        tmp_db fixture (patches get_connection), client fixture (no-op lifespan)
@@ -102,6 +111,12 @@ daily ← transcripts (map-reduce chunked if over `_CHUNK_CHARS`), weekly/monthl
 Timestamps are stored as local ISO strings with offset. Group by `substr(timestamp, ...)`, **never** `strftime(..., timestamp)` — SQLite converts to UTC and shifts late-night events to the previous day.
 
 Camera names are microphone *locations*, not speakers; the summary prompt says so explicitly.
+
+### User edits survive re-transcription
+`PATCH /api/transcriptions/{id}` stores hand-corrected text and keeps the machine text in `original_transcription`. While `edited_at` is set, the worker's `_finish()` writes new machine output to `original_transcription` and leaves the user's text. Manual "Re-transcribe" sets `priority=1` so it jumps the backlog.
+
+### Keyword alerts
+`app/alerts.py` POSTs (plain text + `Title` header; ntfy/Home Assistant compatible) when a first-time transcription of a recent event contains an `alert_keywords` word. Never for re-runs (`refetch`) or old events.
 
 ### asyncio.Lock for Protect client
 `get_protect_client()` is called from the worker and from routes concurrently. The lock in `protect.py` ensures only one coroutine initialises the singleton at a time.
@@ -207,7 +222,9 @@ lint → typecheck → test → scan-source → build → release → scan-image
 - **Never** open `sqlite3.connect()` in route handlers — use `get_connection()`
 - **Never** edit `static/app.css` by hand — it is generated
 - **Do not** add `AVAILABLE_MODELS` to `config.py` — the model list comes from speaches registry at runtime
-- Keep all Tailwind classes in `templates/index.html` and `static/app.js`; the CLI scans both for JIT purging
+- Tailwind scans `templates/**/*.html` and `static/js/**/*.js`; shared component classes (`.btn`, `.card`, `.field`, …) live in `app.css.src` under `@layer components`
+- Anything rendered with `x-html` must go through `escapeHtml` (format.js) first; transcript text is untrusted
+- Slow LLM work (summary rebuilds, Ask) runs via `app/jobs.py` and is polled with `GET /api/jobs/{id}` — Cloudflare cuts requests at ~100 s
 - ruff replaces flake8/black/isort — do not add those as dependencies
 - mypy runs with `ignore_missing_imports = true`; add `# type: ignore[attr-defined]` only when stubs are genuinely missing
 - Bare `try/except/pass` → `contextlib.suppress(...)`

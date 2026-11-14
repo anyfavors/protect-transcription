@@ -27,6 +27,8 @@ _ALLOWED_KEYS = {
     "ollama_url",
     "ollama_model",
     "summary_language",
+    "alert_keywords",
+    "alert_url",
     "min_audio_energy",
     "audio_compression_days",
     "auto_sync_hours",

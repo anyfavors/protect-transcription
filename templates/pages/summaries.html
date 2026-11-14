@@ -1,0 +1,84 @@
+<section x-data="summariesPage" class="max-w-6xl mx-auto flex flex-col gap-5">
+    <header class="flex flex-wrap items-center gap-3">
+        <h1 class="text-2xl font-semibold tracking-tight mr-auto">Summaries</h1>
+        <div class="segmented" role="tablist" aria-label="Period">
+            <template x-for="p in PERIODS" :key="p.id">
+                <button type="button" role="tab" :aria-selected="period === p.id" :class="period === p.id && 'is-on'" @click="setPeriod(p.id)" x-text="p.label"></button>
+            </template>
+        </div>
+    </header>
+    <p class="text-sm text-slate-500 dark:text-slate-400 -mt-2">
+        Built automatically: when transcripts change, the day is rebuilt, then its week, month and year. Today’s, this week’s, this month’s and this year’s summaries refresh once a night.
+    </p>
+
+    <div x-show="loading" class="text-sm text-slate-500 py-10 text-center">Loading…</div>
+
+    <div x-show="!loading" class="grid gap-5 lg:grid-cols-[20rem_1fr] items-start">
+
+        <!-- Left: calendar (days) or list of periods -->
+        <div class="flex flex-col gap-3 lg:sticky lg:top-4">
+            <div x-show="period === 'daily'" class="card p-3">
+                <div class="flex items-center justify-between mb-2">
+                    <button type="button" class="icon-btn" @click="shiftMonth(-1)" aria-label="Previous month"><span x-html="$icon('chevron-left')"></span></button>
+                    <span class="text-sm font-medium" x-text="monthLabel"></span>
+                    <button type="button" class="icon-btn" @click="shiftMonth(1)" aria-label="Next month"><span x-html="$icon('chevron-right')"></span></button>
+                </div>
+                <div class="grid grid-cols-7 gap-1 text-center text-[10px] text-slate-400 mb-1">
+                    <span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span><span>S</span>
+                </div>
+                <div class="grid grid-cols-7 gap-1">
+                    <template x-for="(cell, i) in calendar" :key="i">
+                        <div>
+                            <template x-if="cell">
+                                <button type="button" class="cal-day" :disabled="!cell.item"
+                                    :class="['heat-' + heat(cell.item), selectedKey === cell.key && 'is-selected', cell.item && state(cell.item) !== 'fresh' && 'is-stale']"
+                                    @click="select(cell.key)"
+                                    :title="cell.item ? cell.item.count + ' clips' + (stateLabel(cell.item) ? ' · ' + stateLabel(cell.item) : '') : 'No clips'"
+                                    x-text="cell.day"></button>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+                <p class="text-[11px] text-slate-400 mt-2">Darker = more conversation. Dashed = waiting to be rebuilt.</p>
+            </div>
+
+            <div class="card divide-y divide-slate-100 dark:divide-slate-800 max-h-[28rem] overflow-y-auto" x-show="period !== 'daily' || items.length">
+                <template x-for="item in (period === 'daily' ? items.filter(i => i.period_key.startsWith(month)) : items)" :key="item.period_key">
+                    <button type="button" class="w-full text-left px-3 py-2 flex items-center gap-2 text-sm hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                        :class="selectedKey === item.period_key && 'bg-teal-50 dark:bg-teal-950/40'" @click="select(item.period_key)">
+                        <span class="flex-1 truncate" x-text="periodLabel(period, item.period_key)"></span>
+                        <span class="text-xs text-slate-400 tabular-nums" x-text="item.count"></span>
+                        <span class="w-2 h-2 rounded-full shrink-0"
+                            :class="{ 'bg-emerald-500': state(item) === 'fresh', 'bg-amber-400': state(item) === 'stale', 'bg-slate-300 dark:bg-slate-600': state(item) === 'missing', 'bg-teal-500 animate-pulse': state(item) === 'building' }"
+                            :title="stateLabel(item) || 'Up to date'"></span>
+                    </button>
+                </template>
+            </div>
+        </div>
+
+        <!-- Right: the summary -->
+        <article class="card p-5 sm:p-6 min-h-64" x-show="selected">
+            <header class="flex flex-wrap items-start gap-3 mb-3">
+                <div class="mr-auto">
+                    <h2 class="text-xl font-semibold" x-text="selected && periodLabel(period, selected.period_key)"></h2>
+                    <p class="text-sm text-slate-500 dark:text-slate-400">
+                        <span x-text="selected && number(selected.count)"></span> clips
+                        <span x-show="selected?.generated_at" x-text="'· updated ' + relative(selected?.generated_at)"></span>
+                        <span x-show="stateLabel(selected)" class="text-amber-600 dark:text-amber-400" x-text="'· ' + stateLabel(selected)"></span>
+                    </p>
+                </div>
+                <a x-show="period === 'daily'" class="btn" :href="selected && '#/day/' + selected.period_key"><span x-html="$icon('calendar-days')"></span>Open day</a>
+                <button type="button" class="btn" @click="rebuild(selected)" :disabled="selected?.job || selected?.generating">
+                    <span :class="(selected?.job || selected?.generating) && 'animate-spin'" x-html="$icon('refresh-cw')"></span>
+                    <span x-text="(selected?.job || selected?.generating) ? 'Rebuilding…' : 'Rebuild now'"></span>
+                </button>
+            </header>
+            <div x-show="selected?.summary" class="summary-body" x-html="summaryHtml(selected)"></div>
+            <p x-show="selected && !selected.summary" class="text-slate-500 dark:text-slate-400">
+                Not built yet. It will be built automatically the next time the transcription queue is idle, or you can rebuild it now.
+            </p>
+            <p x-show="period === 'daily' && selected?.summary" class="text-xs text-slate-400 mt-4">Times link to that moment on the day page.</p>
+        </article>
+        <div x-show="!selected" class="card p-10 text-center text-slate-500 dark:text-slate-400">No summaries for this period yet.</div>
+    </div>
+</section>

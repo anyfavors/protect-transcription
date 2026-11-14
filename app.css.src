@@ -1,29 +1,126 @@
 @import "tailwindcss";
 
-/* Class-based dark mode: override built-in dark variant to use .dark class on ancestor */
+/* Class-based dark mode: .dark on <html>, set from the theme setting (system/light/dark). */
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* Tell Tailwind where to scan for utility classes */
 @source "./templates/**/*.html";
-@source "./static/**/*.js";
+@source "./static/js/**/*.js";
 
-/* Custom styles */
+/* Design tokens used outside utilities (waveform colours, heatmap). */
+:root {
+    --accent-rgb: 13 148 136;      /* teal-600 */
+    --wave: #cbd5e1;               /* slate-300 */
+    --wave-progress: #0d9488;      /* teal-600 */
+    --wave-cursor: #ea580c;        /* orange-600 */
+    color-scheme: light;
+}
+.dark {
+    --accent-rgb: 45 212 191;      /* teal-400 */
+    --wave: #334155;               /* slate-700 */
+    --wave-progress: #2dd4bf;      /* teal-400 */
+    --wave-cursor: #fb923c;        /* orange-400 */
+    color-scheme: dark;
+}
+
 [x-cloak] { display: none !important; }
 
-.audio-player { max-width: 100%; height: 32px; }
+@layer components {
+    .card { @apply rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900; }
 
-mark { background-color: #fef08a; padding: 0 2px; border-radius: 2px; }
+    .btn {
+        @apply inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700
+            hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition
+            dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800;
+    }
+    .btn-primary { @apply border-teal-600 bg-teal-600 text-white hover:bg-teal-700 dark:border-teal-500 dark:bg-teal-600 dark:text-white dark:hover:bg-teal-500; }
+    .btn-danger { @apply text-orange-700 hover:bg-orange-50 dark:text-orange-400 dark:hover:bg-orange-950/40; }
+    .btn-danger-solid { @apply border-orange-600 bg-orange-600 text-white hover:bg-orange-700 dark:border-orange-600 dark:bg-orange-600 dark:text-white; }
+    .icon-btn {
+        @apply grid h-8 w-8 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40
+            dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100;
+    }
+
+    .field {
+        @apply w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-900 outline-none
+            focus:border-teal-500 focus:ring-2 focus:ring-teal-500/30
+            dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100;
+    }
+
+    .chip {
+        @apply inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-xs text-slate-600 hover:border-teal-400
+            dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300;
+    }
+    .chip-on { @apply border-teal-500 bg-teal-50 text-teal-800 dark:bg-teal-950/50 dark:text-teal-200; }
+    .badge { @apply rounded px-1.5 py-px text-[10px] font-medium uppercase tracking-wide bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300; }
+    .badge-wait { @apply bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300; }
+    .badge-muted { @apply bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400; }
+    .kbd { @apply rounded border border-b-2 border-slate-300 px-1.5 font-mono text-xs text-slate-600 dark:border-slate-600 dark:text-slate-300; }
+
+    .segmented { @apply inline-flex gap-0.5 rounded-lg bg-slate-100 p-0.5 dark:bg-slate-800/80; }
+    .segmented > button {
+        @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1 text-sm text-slate-600 hover:text-slate-900
+            dark:text-slate-300 dark:hover:text-white;
+    }
+    .segmented > button.is-on { @apply bg-white font-medium text-slate-900 shadow-sm dark:bg-slate-950 dark:text-white; }
+
+    .nav-link {
+        @apply flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-slate-600 hover:bg-slate-100 hover:text-slate-900
+            dark:text-slate-400 dark:hover:bg-slate-800/70 dark:hover:text-slate-100;
+    }
+    .nav-active { @apply bg-teal-50 font-medium text-teal-800 dark:bg-teal-950/50 dark:text-teal-200; }
+
+    .status-strip {
+        @apply sticky top-0 z-20 flex items-center gap-4 border-b border-slate-200 bg-slate-50/90 px-4 py-2 text-xs text-slate-500 backdrop-blur sm:px-6
+            dark:border-slate-800 dark:bg-slate-950/90 dark:text-slate-400;
+        padding-top: max(0.5rem, env(safe-area-inset-top));
+    }
+
+    /* Day timeline */
+    .lane { @apply relative h-7 rounded-md bg-slate-100 dark:bg-slate-800/60; }
+    .lane-block {
+        @apply absolute top-1 bottom-1 min-w-1.5 rounded-sm bg-teal-500 hover:bg-teal-700 focus-visible:outline-2 focus-visible:outline-teal-600 dark:bg-teal-400 dark:hover:bg-teal-200;
+    }
+    .lane-block.is-pending { @apply bg-sky-300 dark:bg-sky-700; }
+    .lane-block.is-hidden { @apply bg-slate-300 dark:bg-slate-600; }
+    .lane-block.is-selected { @apply bg-orange-500 ring-2 ring-orange-300 dark:bg-orange-400 dark:ring-orange-700; }
+
+    .clip-row {
+        @apply grid w-full grid-cols-[3.5rem_1fr] items-start gap-3 px-4 py-3 text-left hover:bg-slate-50 dark:hover:bg-slate-800/50;
+    }
+    .clip-row.is-selected { @apply bg-teal-50 dark:bg-teal-950/40; }
+
+    .clip-panel {
+        @apply flex w-full flex-col border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900
+            lg:sticky lg:top-[2.4rem] lg:h-[calc(100dvh-2.4rem)] lg:w-[28rem] lg:shrink-0 lg:border-l;
+    }
+    .seg-line { @apply grid w-full grid-cols-[2.75rem_1fr] gap-2 rounded-md px-2 py-1 text-left leading-relaxed hover:bg-slate-50 dark:hover:bg-slate-800/60; }
+    .seg-line.is-active { @apply bg-teal-50 dark:bg-teal-950/50; }
+
+    /* Summaries calendar */
+    .cal-day { @apply aspect-square w-full rounded-md text-xs tabular-nums text-slate-400 disabled:cursor-default dark:text-slate-600; }
+    .cal-day:not(:disabled) { @apply hover:ring-2 hover:ring-teal-400; }
+    .cal-day.heat-1 { @apply bg-teal-100 text-teal-900 dark:bg-teal-950 dark:text-teal-200; }
+    .cal-day.heat-2 { @apply bg-teal-300 text-teal-950 dark:bg-teal-800 dark:text-teal-50; }
+    .cal-day.heat-3 { @apply bg-teal-600 text-white dark:bg-teal-500 dark:text-teal-950; }
+    .cal-day.is-stale { @apply outline-2 outline-dashed outline-amber-400 -outline-offset-2; }
+    .cal-day.is-selected { @apply ring-2 ring-orange-500; }
+
+    .summary-body { @apply leading-relaxed text-slate-800 dark:text-slate-200; }
+    .timeref { @apply font-mono text-[0.9em] text-teal-700 underline decoration-dotted underline-offset-2 hover:text-orange-600 dark:text-teal-300; }
+    .answer .cite { @apply mx-0.5 rounded bg-teal-50 px-1 font-mono text-xs text-teal-800 hover:bg-teal-100 dark:bg-teal-950 dark:text-teal-200; }
+
+    .stat-label { @apply text-xs text-slate-500 dark:text-slate-400; }
+    .stat-value { @apply text-xl font-semibold tabular-nums; }
+    .setting { @apply flex flex-col gap-2; }
+    .setting-title { @apply font-medium; }
+    .setting-help { @apply max-w-prose text-sm text-slate-500 dark:text-slate-400; }
+    .action-row { @apply flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between; }
+}
+
+mark { background-color: #fde68a; color: inherit; padding: 0 2px; border-radius: 2px; }
 .dark mark { background-color: #854d0e; color: #fef9c3; }
 
-[id^="segments-"] { max-height: 280px; overflow-y: auto; scroll-behavior: smooth; }
-
-@keyframes segment-pulse {
-    0%, 100% { background-color: rgb(219 234 254); }
-    50%       { background-color: rgb(191 219 254); }
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
-@keyframes segment-pulse-dark {
-    0%, 100% { background-color: rgb(30 58 138 / 0.4); }
-    50%       { background-color: rgb(30 64 175 / 0.6); }
-}
-.segment-active       { animation: segment-pulse 2s ease-in-out infinite; }
-.dark .segment-active { animation: segment-pulse-dark 2s ease-in-out infinite; }

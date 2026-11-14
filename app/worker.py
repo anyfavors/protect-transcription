@@ -272,6 +272,11 @@ async def process_pending_transcription(row: dict) -> None:
             confidence=result.get("confidence", 0),
         )
         final_status = "completed"
+        # Alerts only for first-time results of recent events, never for re-runs.
+        if not row.get("processed_at") and not row.get("refetch"):
+            from app.alerts import check_alerts
+
+            await check_alerts(record_id, camera_name, timestamp_str, result.get("text", ""))
 
     logger.info("Finished event %s from %s: %s", event_id, camera_name, final_status)
     await _broadcast_update(record_id, final_status, camera_name, timestamp_str)
@@ -296,7 +301,34 @@ def _finish(
     duration: float,
     **extra: object,
 ) -> None:
-    """Store a final result and clear retry/refetch bookkeeping."""
+    """Store a final result and clear retry/refetch bookkeeping.
+
+    A hand-corrected row keeps the user's text and status; the new machine
+    output goes to original_transcription instead.
+    """
+    conn = _open_conn()
+    try:
+        edited = conn.execute(
+            "SELECT edited_at IS NOT NULL FROM transcriptions WHERE id=?", (record_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if edited and edited[0]:
+        extra = {k: v for k, v in extra.items() if k != "segments"}
+        _set(
+            record_id,
+            status="completed",
+            original_transcription=text,
+            audio_file=audio_filename,
+            duration_seconds=duration,
+            attempts=0,
+            next_attempt_at=None,
+            refetch=0,
+            priority=0,
+            processed_at=_utc_stamp(datetime.now(tz=LOCAL_TZ)),
+            **extra,
+        )
+        return
     _set(
         record_id,
         status=status,
@@ -306,6 +338,7 @@ def _finish(
         attempts=0,
         next_attempt_at=None,
         refetch=0,
+        priority=0,
         processed_at=_utc_stamp(datetime.now(tz=LOCAL_TZ)),
         **extra,
     )
@@ -335,6 +368,7 @@ def _retry_or_fail(record_id: int, attempts: int, message: str, audio_filename: 
         attempts=attempts,
         next_attempt_at=None,
         refetch=0,
+        priority=0,
         processed_at=_utc_stamp(datetime.now(tz=LOCAL_TZ)),
     )
     return "error"
@@ -343,8 +377,8 @@ def _retry_or_fail(record_id: int, attempts: int, message: str, audio_filename: 
 async def _claim_next_pending() -> dict | None:
     """Atomically claim the next ready pending row and return it as a dict.
 
-    New events (no audio yet) go first so a mass re-transcription doesn't
-    delay live ones; the backlog is worked newest-first.
+    Order: rows re-queued by hand, then new events (no audio yet), so a mass
+    re-transcription doesn't delay live ones; the backlog is worked newest-first.
     """
     conn = _open_conn()
     conn.row_factory = sqlite3.Row
@@ -354,10 +388,10 @@ async def _claim_next_pending() -> dict | None:
         cur.execute(
             f"""
             SELECT id, event_id, camera_id, camera_name, timestamp, language, audio_file,
-                   event_end, attempts, refetch
+                   event_end, attempts, refetch, processed_at
             FROM transcriptions
             WHERE {READY_SQL}
-            ORDER BY (audio_file IS NOT NULL), timestamp DESC
+            ORDER BY priority DESC, (audio_file IS NOT NULL), timestamp DESC
             LIMIT 1
             """
         )

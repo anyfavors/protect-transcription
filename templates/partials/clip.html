@@ -1,0 +1,105 @@
+<aside x-data="clipPanel" x-show="open" x-cloak
+    class="clip-panel"
+    @shortcut:play.window="open && toggle()" @shortcut:star.window="open && clip && toggleStar()"
+    @shortcut:edit.window="open && clip && !editing && startEdit()"
+    aria-label="Clip details">
+
+    <!-- Header -->
+    <header class="flex items-start gap-3 px-5 pt-4 pb-3 border-b border-slate-200 dark:border-slate-800">
+        <button type="button" class="icon-btn -ml-2 lg:hidden" @click="$store.ui.closeClip()" aria-label="Back"><span x-html="$icon('chevron-left','w-5 h-5')"></span></button>
+        <div class="min-w-0 flex-1" x-show="clip">
+            <p class="text-lg font-semibold tabular-nums">
+                <span x-text="clip && clock(clip.timestamp, true)"></span>
+                <span class="text-slate-400 dark:text-slate-500 font-normal">·</span>
+                <span x-text="clip?.camera_name"></span>
+            </p>
+            <p class="text-xs text-slate-500 dark:text-slate-400">
+                <a :href="clip && '#/day/' + clip.timestamp.slice(0,10) + '?clip=' + clip.id" class="hover:underline" x-text="clip && longDate(clip.timestamp.slice(0,10))"></a>
+                <span x-show="clip?.duration_seconds" x-text="'· ' + duration(clip?.duration_seconds)"></span>
+            </p>
+        </div>
+        <div class="flex items-center gap-1" x-show="clip">
+            <button type="button" class="icon-btn" @click="toggleStar()" :title="clip?.starred ? 'Remove from saved (s)' : 'Save clip (s)'" :aria-pressed="clip?.starred">
+                <span :class="clip?.starred ? 'text-amber-500' : ''" x-html="$icon('star', clip?.starred ? 'w-5 h-5 fill-current' : 'w-5 h-5')"></span>
+            </button>
+            <button type="button" class="icon-btn hidden lg:grid" @click="$store.ui.closeClip()" title="Close (Esc)" aria-label="Close"><span x-html="$icon('x','w-5 h-5')"></span></button>
+        </div>
+    </header>
+
+    <div x-show="loading" class="p-6 text-sm text-slate-500">Loading…</div>
+
+    <div x-show="clip && !loading" class="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-4">
+
+        <!-- Status note for non-final rows -->
+        <p x-show="statusNote()" class="text-sm rounded-lg px-3 py-2"
+            :class="['error','archived'].includes(clip?.status) ? 'bg-orange-50 text-orange-800 dark:bg-orange-950/40 dark:text-orange-200' : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'"
+            x-text="statusNote()"></p>
+
+        <!-- Player -->
+        <div x-show="clip?.audio_file" class="flex flex-col gap-2">
+            <div x-ref="wave" class="rounded-lg bg-slate-100 dark:bg-slate-900 px-2 min-h-16"></div>
+            <p x-show="waveError" class="text-xs text-orange-600" x-text="waveError"></p>
+            <div class="flex items-center gap-2">
+                <button type="button" class="btn btn-primary w-24" @click="toggle()" :title="playing ? 'Pause (space)' : 'Play (space)'">
+                    <span x-html="$icon(playing ? 'pause' : 'play')"></span><span x-text="playing ? 'Pause' : 'Play'"></span>
+                </button>
+                <span class="font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums" x-text="segTime(time) + ' / ' + segTime(clip?.duration_seconds)"></span>
+                <button type="button" class="btn ml-auto font-mono" @click="cycleSpeed()" title="Playback speed" x-text="speed + '×'"></button>
+            </div>
+        </div>
+
+        <!-- Transcript -->
+        <div x-show="!editing">
+            <div class="flex items-center gap-2 mb-2">
+                <h2 class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Transcript</h2>
+                <span x-show="clip?.edited_at" class="badge">edited by you</span>
+                <button type="button" x-show="clip?.edited_at && clip?.original_transcription" class="text-xs text-teal-700 dark:text-teal-400 hover:underline"
+                    @click="showOriginal = !showOriginal" x-text="showOriginal ? 'Show my version' : 'Show machine version'"></button>
+            </div>
+            <template x-if="segments.length">
+                <ol class="flex flex-col gap-0.5">
+                    <template x-for="(seg, i) in segments" :key="i">
+                        <li :id="'seg-' + i">
+                            <button type="button" class="seg-line" :class="isActive(seg) && 'is-active'" @click="seek(seg.start)" :title="'Play from ' + segTime(seg.start)">
+                                <span class="font-mono text-xs text-teal-700 dark:text-teal-400 tabular-nums pt-0.5" x-text="segTime(seg.start)"></span>
+                                <span x-html="textHtml(seg.text)"></span>
+                            </button>
+                        </li>
+                    </template>
+                </ol>
+            </template>
+            <p x-show="!segments.length && text" class="leading-relaxed" :class="showOriginal && 'text-slate-500 dark:text-slate-400'" x-html="textHtml(text)"></p>
+            <p x-show="!segments.length && !text" class="text-sm text-slate-500 dark:text-slate-400">No text yet.</p>
+        </div>
+
+        <!-- Editor -->
+        <div x-show="editing" class="flex flex-col gap-2">
+            <label for="clip-editor" class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Correct the transcript</label>
+            <textarea id="clip-editor" x-ref="editor" x-model="draft" rows="8" class="field leading-relaxed"
+                @keydown.ctrl.enter="saveEdit()" @keydown.meta.enter="saveEdit()" @keydown.escape.stop="editing = false"></textarea>
+            <p class="text-xs text-slate-500 dark:text-slate-400">The machine version is kept. Re-transcribing won’t overwrite your text, and summaries pick up the change.</p>
+            <div class="flex gap-2">
+                <button type="button" class="btn btn-primary" @click="saveEdit()"><span x-html="$icon('save')"></span>Save</button>
+                <button type="button" class="btn" @click="editing = false">Cancel</button>
+            </div>
+        </div>
+
+        <!-- Note -->
+        <div>
+            <label for="clip-note" class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Note</label>
+            <input id="clip-note" type="text" class="field mt-1" x-model="note" @blur="saveNote()" @keydown.enter="$event.target.blur()" placeholder="Add a note, e.g. what this was about">
+        </div>
+
+        <!-- Actions -->
+        <div class="flex flex-wrap gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+            <button type="button" class="btn" @click="startEdit()" x-show="!editing" title="Edit (e)"><span x-html="$icon('pencil')"></span>Edit text</button>
+            <button type="button" class="btn" x-show="clip?.edited_at" @click="revert()"><span x-html="$icon('undo-2')"></span>Undo edits</button>
+            <button type="button" class="btn" @click="copy()"><span x-html="$icon('copy')"></span>Copy</button>
+            <a class="btn" x-show="clip?.audio_file" :href="clip && '/audio/' + encodeURIComponent(clip.audio_file)" :download="clip?.audio_file"><span x-html="$icon('download')"></span>Audio</a>
+            <a class="btn" x-show="clip?.status === 'completed'" :href="clip && '/api/transcriptions/' + clip.id + '/srt'"><span x-html="$icon('file-text')"></span>Subtitles</a>
+            <button type="button" class="btn" @click="retranscribe()" x-show="clip?.audio_file || clip?.event_id"><span x-html="$icon('rotate-ccw')"></span>Re-transcribe</button>
+            <button type="button" class="btn btn-danger ml-auto" @click="remove()"><span x-html="$icon('trash-2')"></span>Delete</button>
+        </div>
+        <p class="text-xs text-slate-400 dark:text-slate-500" x-show="clip?.processed_at" x-text="clip && 'Transcribed ' + relative(clip.processed_at)"></p>
+    </div>
+</aside>

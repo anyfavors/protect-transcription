@@ -44,7 +44,9 @@ async def daily_activity(days: int = Query(30, ge=1, le=365)):
                    COUNT(*) AS total,
                    SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed,
                    SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors,
-                   SUM(CASE WHEN status='filtered' THEN 1 ELSE 0 END) AS filtered
+                   SUM(CASE WHEN status='filtered' THEN 1 ELSE 0 END) AS filtered,
+                   ROUND(SUM(CASE WHEN status='completed' THEN duration_seconds ELSE 0 END))
+                       AS seconds
             FROM transcriptions
             WHERE timestamp >= datetime('now', 'localtime', ?)
             GROUP BY day
@@ -52,7 +54,7 @@ async def daily_activity(days: int = Query(30, ge=1, le=365)):
             """,
             (f"-{days} days",),
         )
-        cols = ["day", "total", "completed", "errors", "filtered"]
+        cols = ["day", "total", "completed", "errors", "filtered", "seconds"]
         return {"days": [dict(zip(cols, row, strict=False)) for row in cursor.fetchall()]}
     finally:
         conn.close()
@@ -107,6 +109,34 @@ async def language_stats():
         return {"languages": [{"language": row[0], "count": row[1]} for row in cursor.fetchall()]}
     finally:
         conn.close()
+
+
+@router.get("/api/analytics/heatmap")
+async def heatmap(days: int = Query(90, ge=1, le=3650)):
+    """Completed clips per location, weekday (0 = Monday) and local hour."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT camera_name,
+                   (CAST(strftime('%w', substr(timestamp, 1, 10)) AS INTEGER) + 6) % 7 AS wd,
+                   CAST(substr(timestamp, 12, 2) AS INTEGER) AS hour,
+                   COUNT(*), ROUND(SUM(duration_seconds))
+            FROM transcriptions
+            WHERE status = 'completed' AND substr(timestamp, 1, 10) >= date('now', 'localtime', ?)
+            GROUP BY camera_name, wd, hour
+            """,
+            (f"-{days} days",),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {
+        "days": days,
+        "cells": [
+            {"camera": c, "weekday": wd, "hour": h, "count": n, "seconds": s or 0}
+            for c, wd, h, n, s in rows
+        ],
+    }
 
 
 @router.get("/api/storage")

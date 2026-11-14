@@ -1,0 +1,121 @@
+<section x-data="searchPage" class="max-w-4xl mx-auto flex flex-col gap-5">
+    <header class="flex flex-wrap items-center gap-3">
+        <h1 class="text-2xl font-semibold tracking-tight mr-auto" x-text="mode === 'ask' ? 'Ask the archive' : 'Search'"></h1>
+        <div class="segmented" role="tablist" aria-label="Mode">
+            <button type="button" role="tab" :aria-selected="mode === 'search'" :class="mode === 'search' && 'is-on'" @click="setMode('search')">
+                <span x-html="$icon('search')"></span>Search
+            </button>
+            <button type="button" role="tab" :aria-selected="mode === 'ask'" :class="mode === 'ask' && 'is-on'" @click="setMode('ask')">
+                <span x-html="$icon('sparkles')"></span>Ask
+            </button>
+        </div>
+    </header>
+
+    <!-- ───────── Search ───────── -->
+    <div x-show="mode === 'search'" class="flex flex-col gap-4">
+        <div class="card p-3 flex flex-col gap-3">
+            <div class="relative">
+                <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" x-html="$icon('search')"></span>
+                <label for="search-input" class="sr-only">Search words</label>
+                <input id="search-input" type="search" class="field pl-9 text-base" placeholder="Words from a conversation, e.g. dyrlæge or hund"
+                    x-model="q" @input="changed()" autocomplete="off">
+            </div>
+            <div class="flex flex-wrap items-center gap-2 text-sm">
+                <label class="sr-only" for="search-loc">Location</label>
+                <select id="search-loc" class="field w-auto" x-model="location" @change="changed()">
+                    <option value="">All locations</option>
+                    <template x-for="c in $store.ui.cameras" :key="c"><option :value="c" x-text="c"></option></template>
+                </select>
+                <label class="flex items-center gap-1.5">From <input type="date" class="field w-auto" x-model="from" @change="changed()"></label>
+                <label class="flex items-center gap-1.5">To <input type="date" class="field w-auto" x-model="to" @change="changed()"></label>
+                <label class="inline-flex items-center gap-2 cursor-pointer ml-1">
+                    <input type="checkbox" class="accent-teal-600" x-model="saved" @change="changed()">
+                    <span class="inline-flex items-center gap-1">Saved only <span class="text-amber-500" x-html="$icon('star','w-3.5 h-3.5 fill-current')"></span></span>
+                </label>
+                <button type="button" class="text-xs text-teal-700 dark:text-teal-400 hover:underline ml-auto" x-show="hasCriteria" @click="clearFilters()">Clear</button>
+            </div>
+        </div>
+
+        <p class="text-sm text-slate-500 dark:text-slate-400" x-show="hasCriteria && !loading">
+            <span x-text="total.toLocaleString('en-GB')"></span> <span x-text="total === 1 ? 'match' : 'matches'"></span>
+            <span x-show="q.trim()">· words match their beginnings, so <em>hund</em> also finds <em>hunden</em> and <em>hundehus</em></span>
+        </p>
+
+        <div class="card divide-y divide-slate-100 dark:divide-slate-800" x-show="results.length">
+            <template x-for="r in results" :key="r.id">
+                <button type="button" class="clip-row grid-cols-[6.5rem_1fr]" :class="$store.ui.clipId === r.id && 'is-selected'" @click="$store.ui.openClip(r.id)">
+                    <span class="text-xs text-slate-500 dark:text-slate-400 tabular-nums leading-5">
+                        <span class="block" x-text="r.timestamp.slice(0,10)"></span>
+                        <span class="block font-mono" x-text="clock(r.timestamp)"></span>
+                    </span>
+                    <span class="min-w-0">
+                        <span class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 mb-0.5">
+                            <span x-text="r.camera_name"></span>
+                            <span x-show="r.duration_seconds" x-text="'· ' + duration(r.duration_seconds)"></span>
+                            <span x-show="r.starred" class="text-amber-500" x-html="$icon('star','w-3.5 h-3.5 fill-current')"></span>
+                            <span x-show="r.note" class="truncate italic" x-text="'“' + r.note + '”'"></span>
+                        </span>
+                        <span class="line-clamp-3 text-[15px] leading-snug" x-html="resultHtml(r)"></span>
+                    </span>
+                </button>
+            </template>
+        </div>
+        <button type="button" class="btn self-center" x-show="results.length < total" @click="run(true)" :disabled="loading">Show more</button>
+        <p x-show="loading" class="text-sm text-slate-500 text-center py-6">Searching…</p>
+        <div x-show="!hasCriteria" class="card p-8 text-center text-slate-500 dark:text-slate-400">
+            <p>Search every transcript by words, location and date.</p>
+            <p class="text-sm mt-1">Tip: tick <em>Saved only</em> to see clips you starred, or press <kbd class="kbd">/</kbd> from anywhere.</p>
+        </div>
+        <div x-show="hasCriteria && !loading && !results.length" x-cloak class="card p-8 text-center text-slate-500 dark:text-slate-400">
+            No matches. Try fewer or shorter words, or use <button type="button" class="text-teal-700 dark:text-teal-400 underline" @click="setMode('ask')">Ask</button> for questions.
+        </div>
+    </div>
+
+    <!-- ───────── Ask ───────── -->
+    <div x-show="mode === 'ask'" x-cloak class="flex flex-col gap-4">
+        <form class="card p-3 flex flex-col gap-3" @submit.prevent="ask()">
+            <label for="ask-input" class="text-sm text-slate-600 dark:text-slate-300">Ask about anything that was said. The answer comes from your own transcripts, run on your own server, with links to the clips.</label>
+            <div class="flex gap-2">
+                <input id="ask-input" type="text" class="field text-base" x-model="question" placeholder="When did we last talk about the vet?" :disabled="asking">
+                <button type="submit" class="btn btn-primary shrink-0" :disabled="asking || !question.trim()"><span x-html="$icon('sparkles')"></span>Ask</button>
+            </div>
+            <div class="flex flex-wrap gap-1.5" x-show="history.length && !asking">
+                <template x-for="h in history" :key="h">
+                    <button type="button" class="chip" @click="ask(h)" x-text="h"></button>
+                </template>
+            </div>
+        </form>
+
+        <div x-show="asking" class="card p-5 flex items-center gap-3 text-sm text-slate-600 dark:text-slate-300">
+            <span class="animate-spin text-teal-600" x-html="$icon('loader-circle')"></span>
+            <span x-text="askStatus"></span>
+            <span class="text-slate-400 ml-auto">This can take a minute.</span>
+        </div>
+
+        <template x-if="answer">
+            <div class="flex flex-col gap-4">
+                <article class="card p-5">
+                    <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-2" x-text="answer.question"></p>
+                    <div x-show="answer.answer" class="leading-relaxed answer" x-html="answerHtml()" @click="citeClick($event)"></div>
+                    <p x-show="!answer.answer" class="text-slate-600 dark:text-slate-300">No clips matched. Searched for: <span x-text="answer.keywords.join(', ')"></span>.</p>
+                    <p x-show="answer.answer" class="text-xs text-slate-400 mt-3">Searched for: <span x-text="answer.keywords.join(', ')"></span> · <span x-text="answer.sources.length"></span> clips read. Answers can be wrong; check the clips.</p>
+                </article>
+                <div class="card divide-y divide-slate-100 dark:divide-slate-800" x-show="answer.sources.length">
+                    <template x-for="s in answer.sources.slice(0, 12)" :key="s.id">
+                        <button type="button" class="clip-row grid-cols-[6.5rem_1fr]" @click="$store.ui.openClip(s.id)">
+                            <span class="text-xs text-slate-500 dark:text-slate-400 tabular-nums leading-5">
+                                <span class="block" x-text="'#' + s.id"></span>
+                                <span class="block" x-text="s.timestamp.slice(0,10)"></span>
+                                <span class="block font-mono" x-text="clock(s.timestamp)"></span>
+                            </span>
+                            <span class="min-w-0">
+                                <span class="text-xs text-slate-500 dark:text-slate-400" x-text="s.camera_name"></span>
+                                <span class="line-clamp-2 text-sm" x-text="s.transcription"></span>
+                            </span>
+                        </button>
+                    </template>
+                </div>
+            </div>
+        </template>
+    </div>
+</section>

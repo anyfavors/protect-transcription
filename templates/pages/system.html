@@ -1,0 +1,233 @@
+<section x-data="systemPage" class="max-w-4xl mx-auto flex flex-col gap-5">
+    <header class="flex flex-col gap-3">
+        <h1 class="text-2xl font-semibold tracking-tight">System</h1>
+        <div class="segmented overflow-x-auto self-start max-w-full" role="tablist" aria-label="System sections">
+            <template x-for="t in TABS" :key="t.id">
+                <button type="button" role="tab" :aria-selected="tab === t.id" :class="tab === t.id && 'is-on'" @click="setTab(t.id)" x-text="t.label"></button>
+            </template>
+        </div>
+    </header>
+
+    <!-- ───────── Status ───────── -->
+    <div x-show="tab === 'status'" class="flex flex-col gap-4">
+        <div class="grid sm:grid-cols-3 gap-3">
+            <template x-for="svc in services" :key="svc.id">
+                <div class="card p-4 flex flex-col gap-1">
+                    <div class="flex items-center gap-2">
+                        <span class="w-2.5 h-2.5 rounded-full" :class="!svc.check ? 'bg-slate-300' : svc.check.ok ? 'bg-emerald-500' : 'bg-orange-500'"></span>
+                        <span class="font-medium" x-text="svc.name"></span>
+                    </div>
+                    <p class="text-xs text-slate-500 dark:text-slate-400" x-text="svc.role"></p>
+                    <p class="text-sm mt-1 break-words" :class="svc.check && !svc.check.ok && 'text-orange-700 dark:text-orange-300'"
+                       x-text="!svc.check ? 'Checking…' : svc.check.ok ? svc.check.detail + ' · ' + svc.check.ms + ' ms' : svc.check.detail"></p>
+                </div>
+            </template>
+        </div>
+
+        <div class="card p-5 grid sm:grid-cols-4 gap-4">
+            <div><p class="stat-label">To transcribe</p><p class="stat-value" x-text="number($store.ui.stats.queued + $store.ui.stats.processing)"></p></div>
+            <div><p class="stat-label">Speed</p><p class="stat-value" x-text="$store.ui.stats.rate_per_hour + ' / h'"></p></div>
+            <div><p class="stat-label">Time left</p><p class="stat-value" x-text="eta($store.ui.stats.eta_seconds) || '—'"></p></div>
+            <div><p class="stat-label">Transcribed</p><p class="stat-value" x-text="number($store.ui.stats.completed)"></p></div>
+            <div><p class="stat-label">No speech</p><p class="stat-value" x-text="number($store.ui.stats.filtered)"></p></div>
+            <div><p class="stat-label">Failed</p><p class="stat-value" :class="$store.ui.stats.errors && 'text-orange-600 dark:text-orange-400'" x-text="number($store.ui.stats.errors)"></p></div>
+            <div><p class="stat-label">Archived</p><p class="stat-value" x-text="number($store.ui.stats.archived)"></p></div>
+            <div><p class="stat-label">Total clips</p><p class="stat-value" x-text="number($store.ui.stats.total)"></p></div>
+        </div>
+        <p x-show="$store.ui.stats.errors" class="text-sm text-slate-600 dark:text-slate-300">
+            Failed clips can be retried or archived under <a href="#/system/maintenance" class="text-teal-700 dark:text-teal-400 underline">Maintenance</a>.
+        </p>
+
+        <div class="card p-5" x-show="storage">
+            <h2 class="font-semibold mb-3">Storage</h2>
+            <div class="grid sm:grid-cols-4 gap-4">
+                <div><p class="stat-label">Total</p><p class="stat-value" x-text="bytes(storage?.total_bytes)"></p></div>
+                <div><p class="stat-label">Recent audio (WAV)</p><p class="stat-value" x-text="bytes(storage?.wav_bytes)"></p><p class="text-xs text-slate-400" x-text="number(storage?.wav_files) + ' files'"></p></div>
+                <div><p class="stat-label">Compressed audio</p><p class="stat-value" x-text="bytes(storage?.ogg_bytes)"></p><p class="text-xs text-slate-400" x-text="number(storage?.ogg_files) + ' files'"></p></div>
+                <div><p class="stat-label">Database</p><p class="stat-value" x-text="bytes(storage?.database_bytes)"></p></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ───────── Recording ───────── -->
+    <div x-show="tab === 'recording'" class="flex flex-col gap-4">
+        <div class="card p-5 flex flex-col gap-5">
+            <div class="setting">
+                <div><p class="setting-title">Clip length around speech</p>
+                    <p class="setting-help">How much audio to keep before speech starts and after it stops. More context helps transcription but adds silence.</p></div>
+                <div class="flex flex-wrap gap-3">
+                    <label class="flex items-center gap-2 text-sm">Before <input type="number" min="1" max="60" class="field w-20" x-model="settings.buffer_before"> s</label>
+                    <label class="flex items-center gap-2 text-sm">After <input type="number" min="1" max="600" class="field w-20" x-model="settings.buffer_after"> s</label>
+                </div>
+                <p class="text-sm text-teal-800 dark:text-teal-300 bg-teal-50 dark:bg-teal-950/40 rounded-lg px-3 py-2" x-text="clipExample"></p>
+            </div>
+            <div class="setting">
+                <div><p class="setting-title">Skip near-silent clips</p>
+                    <p class="setting-help">Clips quieter than this are marked “no speech” without transcribing them. 0 turns it off. The default 0.005 only skips near-total silence.</p></div>
+                <input type="number" step="0.001" min="0" max="1" class="field w-32" x-model="settings.min_audio_energy">
+            </div>
+            <div class="setting">
+                <div><p class="setting-title">Compress older audio</p>
+                    <p class="setting-help">Audio older than this many days is converted to Opus (about a tenth of the size, still fine for listening). 0 keeps everything as WAV.</p></div>
+                <label class="flex items-center gap-2 text-sm"><input type="number" min="0" max="365" class="field w-20" x-model="settings.audio_compression_days"> days</label>
+            </div>
+            <div class="setting">
+                <div><p class="setting-title">Catch missed events</p>
+                    <p class="setting-help">New speech arrives instantly through the NVR’s alarm webhook. As a safety net the app also asks the NVR for recent events on a timer.</p></div>
+                <div class="flex flex-wrap gap-3 text-sm">
+                    <label class="flex items-center gap-2">Every <input type="number" min="5" max="1440" class="field w-20" x-model="settings.auto_sync_interval_minutes"> min</label>
+                    <label class="flex items-center gap-2">looking back <input type="number" min="1" max="720" class="field w-20" x-model="settings.auto_sync_hours"> h</label>
+                </div>
+            </div>
+            <div class="setting">
+                <div><p class="setting-title">UniFi Protect NVR</p>
+                    <p class="setting-help">Host name or IP of the NVR. Turn on certificate checking only if the NVR has a trusted certificate.</p></div>
+                <div class="flex flex-wrap items-center gap-3">
+                    <input type="text" class="field w-56" x-model="settings.protect_host" placeholder="10.0.50.14">
+                    <label class="inline-flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" class="accent-teal-600" :checked="settings.protect_verify_ssl === 'true'" @change="toggle('protect_verify_ssl')"> Check certificate</label>
+                    <button type="button" class="btn" @click="testProtect()" :disabled="busy === 'protect'" x-text="busy === 'protect' ? 'Testing…' : 'Test connection'"></button>
+                </div>
+            </div>
+        </div>
+        {% include "partials/save_bar.html" %}
+    </div>
+
+    <!-- ───────── Transcription ───────── -->
+    <div x-show="tab === 'transcription'" class="flex flex-col gap-4">
+        <div class="card p-5 flex flex-col gap-5">
+            <div class="setting">
+                <div><p class="setting-title">Speech model</p>
+                    <p class="setting-help">The model installed on the speaches server that turns audio into text. Changing it applies to new clips; use Maintenance → Re-transcribe to redo old ones.</p></div>
+                <div class="flex flex-wrap items-center gap-3">
+                    <select class="field w-auto max-w-full" x-model="settings.whisper_model">
+                        <template x-for="m in installedModels" :key="m"><option :value="m" x-text="m"></option></template>
+                    </select>
+                    <button type="button" class="btn" @click="testWhisper()" :disabled="busy === 'whisper'" x-text="busy === 'whisper' ? 'Testing…' : 'Test server'"></button>
+                </div>
+                <p x-show="modelsError" class="text-sm text-orange-600" x-text="modelsError"></p>
+            </div>
+            <div class="setting">
+                <div><p class="setting-title">Language</p>
+                    <p class="setting-help">Fixing the language is more reliable than auto-detect for short, noisy clips. The current Danish model also handles short English phrases.</p></div>
+                <select class="field w-auto" x-model="settings.language">
+                    <template x-for="l in languages" :key="l.code"><option :value="l.code" x-text="l.name"></option></template>
+                </select>
+            </div>
+            <div class="setting">
+                <div><p class="setting-title">Skip silence inside clips</p>
+                    <p class="setting-help">Voice activity detection cuts silent stretches before recognition. It is faster and prevents most invented text, so leave it on.</p></div>
+                <label class="inline-flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" class="accent-teal-600" :checked="settings.vad_filter === 'true'" @change="toggle('vad_filter')"> On</label>
+            </div>
+        </div>
+        {% include "partials/save_bar.html" %}
+    </div>
+
+    <!-- ───────── Summaries ───────── -->
+    <div x-show="tab === 'summaries'" class="flex flex-col gap-4">
+        <div class="card p-5 flex flex-col gap-5">
+            <div class="setting">
+                <div><p class="setting-title">Language model</p>
+                    <p class="setting-help">The Ollama server and model that write summaries and answer questions.</p></div>
+                <div class="flex flex-wrap gap-3">
+                    <input type="text" class="field w-72 max-w-full" x-model="settings.ollama_url" placeholder="http://ollama:11434">
+                    <input type="text" class="field w-44" x-model="settings.ollama_model" placeholder="qwen2.5:7b">
+                </div>
+            </div>
+            <div class="setting">
+                <div><p class="setting-title">Summary language</p>
+                    <p class="setting-help">The language summaries are written in, for example English or Danish.</p></div>
+                <input type="text" class="field w-44" x-model="settings.summary_language">
+            </div>
+            <div class="setting">
+                <div><p class="setting-title">Nightly refresh</p>
+                    <p class="setting-help">Past days, weeks and months are rebuilt whenever their transcripts change. The current ones are refreshed once a night after this time.</p></div>
+                <input type="time" class="field w-32" x-model="settings.auto_summary_time">
+            </div>
+        </div>
+        {% include "partials/save_bar.html" %}
+    </div>
+
+    <!-- ───────── Alerts ───────── -->
+    <div x-show="tab === 'alerts'" class="flex flex-col gap-4">
+        <div class="card p-5 flex flex-col gap-5">
+            <div class="setting">
+                <div><p class="setting-title">Words to watch for</p>
+                    <p class="setting-help">Comma-separated. A word matches when a spoken word starts with it, so <em>brand</em> also catches <em>brandalarm</em>. Only new recordings from the last few hours trigger alerts, never re-transcriptions.</p></div>
+                <input type="text" class="field" x-model="settings.alert_keywords" placeholder="hjælp, brand, ambulance">
+            </div>
+            <div class="setting">
+                <div><p class="setting-title">Send alerts to</p>
+                    <p class="setting-help">A URL that receives a POST with the transcript as text and the headline in a <code>Title</code> header. Works with an ntfy topic (e.g. https://ntfy.sh/your-topic) or a Home Assistant webhook.</p></div>
+                <div class="flex flex-wrap gap-3">
+                    <input type="url" class="field flex-1 min-w-60" x-model="settings.alert_url" placeholder="https://ntfy.sh/my-house-alerts">
+                    <button type="button" class="btn" @click="testAlert()" :disabled="busy === 'alert' || !settings.alert_url" x-text="busy === 'alert' ? 'Sending…' : 'Send test alert'"></button>
+                </div>
+            </div>
+        </div>
+        {% include "partials/save_bar.html" %}
+        <div class="card p-5">
+            <h2 class="font-semibold mb-2">Recent alerts</h2>
+            <p x-show="!alertLog.length" class="text-sm text-slate-500 dark:text-slate-400">No alerts sent yet.</p>
+            <ul class="divide-y divide-slate-100 dark:divide-slate-800 text-sm">
+                <template x-for="a in alertLog.slice(0, 30)" :key="a.id">
+                    <li class="py-2 flex gap-3">
+                        <span class="text-slate-500 tabular-nums w-28 shrink-0" x-text="relative(a.ts)"></span>
+                        <span class="flex-1" x-text="alertDetails(a).text"></span>
+                        <button type="button" class="text-teal-700 dark:text-teal-400 hover:underline" x-show="alertDetails(a).id" @click="$store.ui.openClip(alertDetails(a).id)">Open clip</button>
+                    </li>
+                </template>
+            </ul>
+        </div>
+    </div>
+
+    <!-- ───────── Maintenance ───────── -->
+    <div x-show="tab === 'maintenance'" class="flex flex-col gap-4">
+        <div class="card divide-y divide-slate-100 dark:divide-slate-800">
+            <div class="action-row">
+                <div><p class="setting-title">Fetch events from the NVR</p><p class="setting-help">Queue speech events the webhook may have missed.</p></div>
+                <div class="flex items-center gap-2">
+                    <label class="flex items-center gap-1.5 text-sm">Last <input type="number" min="1" max="720" class="field w-20" x-model="syncHours"> h</label>
+                    <button type="button" class="btn" @click="syncNow()" :disabled="busy === 'sync'"><span x-html="$icon('cloud-download')"></span><span x-text="busy === 'sync' ? 'Fetching…' : 'Fetch'"></span></button>
+                </div>
+            </div>
+            <div class="action-row">
+                <div><p class="setting-title">Retry failed clips</p><p class="setting-help"><span x-text="number($store.ui.stats.errors)"></span> clips failed. Clips with audio are transcribed again.</p></div>
+                <button type="button" class="btn" @click="retryErrors()" :disabled="busy === 'retry' || !$store.ui.stats.errors"><span x-html="$icon('rotate-ccw')"></span>Retry</button>
+            </div>
+            <div class="action-row">
+                <div><p class="setting-title">Archive clips that can’t be recovered</p><p class="setting-help">Failed clips with no audio anywhere (the NVR no longer has the footage). They are hidden, not deleted.</p></div>
+                <button type="button" class="btn" @click="archiveErrors()" :disabled="busy === 'archive' || !$store.ui.stats.errors"><span x-html="$icon('archive')"></span>Archive</button>
+            </div>
+            <div class="action-row">
+                <div><p class="setting-title">Re-transcribe everything</p><p class="setting-help">Run all clips through the current model again, newest first. Text you corrected is kept.</p></div>
+                <button type="button" class="btn" @click="retranscribeAll()" :disabled="busy === 'retranscribe'"><span x-html="$icon('refresh-cw')"></span>Re-transcribe</button>
+            </div>
+            <div class="action-row">
+                <div><p class="setting-title">Export</p><p class="setting-help">All transcripts as a spreadsheet, as JSON, or as subtitle files.</p></div>
+                <div class="flex flex-wrap gap-2">
+                    <a class="btn" href="/api/export/csv"><span x-html="$icon('download')"></span>CSV</a>
+                    <a class="btn" href="/api/export/json"><span x-html="$icon('download')"></span>JSON</a>
+                    <a class="btn" href="/api/export/srt"><span x-html="$icon('download')"></span>SRT (zip)</a>
+                </div>
+            </div>
+            <div class="action-row">
+                <div><p class="setting-title text-orange-700 dark:text-orange-400">Delete everything</p><p class="setting-help">Removes every clip, transcript, summary and audio file.</p></div>
+                <button type="button" class="btn btn-danger" @click="resetDatabase()" :disabled="busy === 'reset'"><span x-html="$icon('trash-2')"></span>Delete all</button>
+            </div>
+        </div>
+
+        <div class="card p-5">
+            <h2 class="font-semibold mb-2">Activity log</h2>
+            <p x-show="!audit.length" class="text-sm text-slate-500 dark:text-slate-400">Nothing logged yet.</p>
+            <ul class="divide-y divide-slate-100 dark:divide-slate-800 text-sm max-h-96 overflow-y-auto">
+                <template x-for="a in audit" :key="a.id">
+                    <li class="py-2 grid grid-cols-[7rem_10rem_1fr] gap-3">
+                        <span class="text-slate-500" x-text="relative(a.ts)"></span>
+                        <span class="font-mono text-xs pt-0.5" x-text="a.action"></span>
+                        <span class="text-slate-500 dark:text-slate-400 truncate" x-text="a.details" :title="a.details"></span>
+                    </li>
+                </template>
+            </ul>
+        </div>
+    </div>
+</section>

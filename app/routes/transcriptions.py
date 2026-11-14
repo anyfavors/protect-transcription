@@ -7,7 +7,9 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -30,12 +32,16 @@ router = APIRouter()
 @router.get("/api/transcriptions")
 async def get_transcriptions(
     page: int = Query(1, ge=1),
-    per_page: int = Query(20, ge=1, le=100),
+    per_page: int = Query(20, ge=1, le=500),
     camera: str | None = None,
     date: str | None = None,
     search: str | None = None,
     status: str | None = None,
     cursor: str | None = Query(default=None, description="Keyset cursor: 'timestamp,id'"),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    starred: bool = False,
+    visible: bool = Query(False, description="Hide errors, filtered and archived rows"),
 ):
     """
     List transcriptions.
@@ -51,7 +57,18 @@ async def get_transcriptions(
 
     try:
         rows, total = _query_transcriptions(
-            cur, page, per_page, camera, date, search, status, cursor
+            cur,
+            page,
+            per_page,
+            camera,
+            date,
+            search,
+            status,
+            cursor,
+            date_from=date_from,
+            date_to=date_to,
+            starred=starred,
+            visible=visible,
         )
         transcriptions = [_row_to_dict(r) for r in rows]
 
@@ -84,9 +101,26 @@ def _query_transcriptions(
     search: str | None,
     status: str | None,
     cursor: str | None,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    starred: bool = False,
+    visible: bool = False,
 ) -> tuple[list[sqlite3.Row], int]:
     where: list[str] = []
     params: list = []
+    select = "t.*"
+
+    if date_from:
+        where.append("substr(t.timestamp, 1, 10) >= ?")
+        params.append(date_from)
+    if date_to:
+        where.append("substr(t.timestamp, 1, 10) <= ?")
+        params.append(date_to)
+    if starred:
+        where.append("t.starred = 1")
+    if visible:
+        where.append("t.status IN ('completed', 'pending', 'processing')")
 
     if camera:
         where.append("t.camera_name = ?")
@@ -98,11 +132,15 @@ def _query_transcriptions(
         where.append("t.status = ?")
         params.append(status)
 
-    if search:
-        search_term = search.replace('"', '""')
+    fts_query = fts_prefix_query(search) if search else ""
+    if fts_query:
         where.insert(0, "transcriptions_fts MATCH ?")
-        params.insert(0, f'"{search_term}"')
-        from_clause = "transcriptions t INNER JOIN transcriptions_fts fts ON t.id = fts.rowid"
+        params.insert(0, fts_query)
+        from_clause = (
+            "transcriptions t INNER JOIN transcriptions_fts ON t.id = transcriptions_fts.rowid"
+        )
+        # \x02 / \x03 mark matches; the UI escapes the text, then turns them into <mark>.
+        select = "t.*, snippet(transcriptions_fts, 0, char(2), char(3), '…', 24) AS snippet"
     else:
         from_clause = "transcriptions t"
 
@@ -128,19 +166,110 @@ def _query_transcriptions(
 
     if keyset_clause:
         sql = (
-            f"SELECT t.* FROM {from_clause}{where_sql}{keyset_clause} "
+            f"SELECT {select} FROM {from_clause}{where_sql}{keyset_clause} "
             f"ORDER BY t.timestamp DESC, t.id DESC LIMIT ?"
         )
         cur.execute(sql, [*params, *keyset_params, per_page])
     else:
         offset = (page - 1) * per_page
         sql = (
-            f"SELECT t.* FROM {from_clause}{where_sql} "
+            f"SELECT {select} FROM {from_clause}{where_sql} "
             f"ORDER BY t.timestamp DESC, t.id DESC LIMIT ? OFFSET ?"
         )
         cur.execute(sql, [*params, per_page, offset])
 
     return cur.fetchall(), total
+
+
+def fts_prefix_query(search: str) -> str:
+    """Turn free text into an FTS5 query: every word must match as a prefix.
+
+    "hund skur" → '"hund"* AND "skur"*', so it also finds hunden, hundehus, skuret.
+    """
+    words = re.findall(r"\w+", search.lower())
+    return " AND ".join(f'"{w}"*' for w in words)
+
+
+@router.get("/api/transcriptions/{transcription_id}")
+async def get_transcription(transcription_id: int):
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM transcriptions WHERE id=?", (transcription_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Transcription not found")
+    return _row_to_dict(row)
+
+
+@router.patch("/api/transcriptions/{transcription_id}", dependencies=[Depends(require_api_token)])
+async def update_transcription(transcription_id: int, request: Request):
+    """Edit text (keeps the machine version), star/unstar, or set a note."""
+    data = await request.json()
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM transcriptions WHERE id=?", (transcription_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Transcription not found")
+        fields: dict = {}
+        if "starred" in data:
+            fields["starred"] = 1 if data["starred"] else 0
+        if "note" in data:
+            note = str(data["note"] or "").strip()
+            fields["note"] = note[:2000] or None
+        if "transcription" in data:
+            text = " ".join(str(data["transcription"] or "").split())
+            if not text:
+                raise HTTPException(status_code=400, detail="Text can't be empty")
+            if row["edited_at"] is None:
+                fields["original_transcription"] = row["transcription"]
+            fields["transcription"] = text
+            fields["status"] = "completed"
+            fields["edited_at"] = datetime.now(tz=LOCAL_TZ).isoformat(timespec="seconds")
+        if data.get("revert") and row["edited_at"] is not None:
+            fields.update(
+                transcription=row["original_transcription"],
+                original_transcription=None,
+                edited_at=None,
+            )
+        if not fields:
+            raise HTTPException(status_code=400, detail="Nothing to update")
+        cols = ", ".join(f"{k}=?" for k in fields)
+        conn.execute(
+            f"UPDATE transcriptions SET {cols} WHERE id=?", (*fields.values(), transcription_id)
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM transcriptions WHERE id=?", (transcription_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if "transcription" in fields:
+        audit("edit_transcription", {"id": transcription_id})
+    return _row_to_dict(row)
+
+
+@router.post("/api/transcriptions/archive-errors", dependencies=[Depends(require_api_token)])
+async def archive_errors():
+    """Move errors that can never be fixed (no audio anywhere) out of the way."""
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "UPDATE transcriptions SET status='archived' "
+            "WHERE status='error' AND (audio_file IS NULL OR audio_file='')"
+        )
+        count = cur.rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    audit("archive_errors", {"count": count})
+    return {"archived": count, "message": f"Archived {count} clips without audio"}
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -152,9 +281,19 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     except (KeyError, json.JSONDecodeError):
         pass
 
+    keys = row.keys()
     return {
         "id": row["id"],
         "event_id": row["event_id"],
+        "starred": bool(row["starred"]) if "starred" in keys else False,
+        "note": row["note"] if "note" in keys else None,
+        "edited_at": row["edited_at"] if "edited_at" in keys else None,
+        "original_transcription": (
+            row["original_transcription"] if "original_transcription" in keys else None
+        ),
+        "event_end": row["event_end"] if "event_end" in keys else None,
+        "processed_at": row["processed_at"] if "processed_at" in keys else None,
+        "snippet": row["snippet"] if "snippet" in keys else None,
         "camera_name": row["camera_name"],
         "timestamp": row["timestamp"],
         "transcription": row["transcription"],
@@ -242,6 +381,7 @@ async def get_stats():
         "queued": queued,
         "errors": by_status.get("error", 0),
         "filtered": by_status.get("filtered", 0),
+        "archived": by_status.get("archived", 0),
         "today": today,
         "rate_per_hour": rate_per_hour,
         "eta_seconds": round(queued / rate_per_hour * 3600) if queued and rate_per_hour else None,
@@ -336,9 +476,7 @@ def _retry_one_in_txn(cur: sqlite3.Cursor, row: sqlite3.Row) -> tuple[str, str, 
     cur.execute(
         """
         UPDATE transcriptions
-        SET status='pending',
-            transcription=NULL, segments=NULL, confidence=NULL, duration_seconds=NULL,
-            attempts=0, next_attempt_at=NULL
+        SET status='pending', attempts=0, next_attempt_at=NULL, refetch=1, priority=1
         WHERE id=?
         """,
         (row["id"],),

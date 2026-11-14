@@ -1,0 +1,70 @@
+<section x-data="insightsPage" class="max-w-5xl mx-auto flex flex-col gap-5">
+    <header class="flex flex-wrap items-center gap-3">
+        <h1 class="text-2xl font-semibold tracking-tight mr-auto">Insights</h1>
+        <div class="segmented" role="tablist" aria-label="Range">
+            <template x-for="d in [30, 90, 365]" :key="d">
+                <button type="button" role="tab" :aria-selected="days === d" :class="days === d && 'is-on'" @click="setDays(d)" x-text="d === 365 ? '1 year' : d + ' days'"></button>
+            </template>
+        </div>
+    </header>
+
+    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3" x-show="!loading">
+        <div class="card p-4"><p class="text-xs text-slate-500 dark:text-slate-400">Speech recorded</p><p class="text-2xl font-semibold tabular-nums" x-text="speechTotal(totalSpeech)"></p></div>
+        <div class="card p-4"><p class="text-xs text-slate-500 dark:text-slate-400">Conversations</p><p class="text-2xl font-semibold tabular-nums" x-text="number(totalClips)"></p></div>
+        <div class="card p-4 col-span-2 sm:col-span-1"><p class="text-xs text-slate-500 dark:text-slate-400">Busiest location</p><p class="text-2xl font-semibold truncate" x-text="perLocation[0]?.camera || '—'"></p></div>
+    </div>
+
+    <!-- When: weekday × hour -->
+    <div class="card p-4 sm:p-5">
+        <div class="flex flex-wrap items-center gap-2 mb-4">
+            <h2 class="font-semibold mr-auto">When people talk</h2>
+            <button type="button" class="chip" :class="!location && 'chip-on'" @click="location = ''">All</button>
+            <template x-for="l in locations" :key="l">
+                <button type="button" class="chip" :class="location === l && 'chip-on'" @click="location = l" x-text="l"></button>
+            </template>
+        </div>
+        <div class="overflow-x-auto">
+            <div class="grid grid-cols-[2.5rem_repeat(24,minmax(1.1rem,1fr))] gap-[3px] min-w-[34rem] text-[10px] text-slate-400">
+                <span></span>
+                <template x-for="h in 24" :key="h"><span class="text-center tabular-nums" x-text="(h - 1) % 3 === 0 ? String(h - 1).padStart(2, '0') : ''"></span></template>
+                <template x-for="(row, wd) in grid" :key="wd">
+                    <div class="contents">
+                        <span class="self-center" x-text="WEEKDAYS[wd]"></span>
+                        <template x-for="(sec, h) in row" :key="h">
+                            <span class="h-5 rounded-[3px] bg-slate-100 dark:bg-slate-800/70" :style="cellStyle(sec)" :title="cellTitle(wd, h, sec)"></span>
+                        </template>
+                    </div>
+                </template>
+            </div>
+        </div>
+        <p class="text-xs text-slate-400 mt-3">Each square is one hour of the week; darker means more minutes of speech in the selected period.</p>
+    </div>
+
+    <div class="grid gap-5 lg:grid-cols-[1fr_20rem]">
+        <!-- Speech per day -->
+        <div class="card p-4 sm:p-5">
+            <div class="flex items-baseline justify-between mb-3">
+                <h2 class="font-semibold">Speech per day</h2>
+                <span class="text-xs text-slate-400" x-text="'max ' + dailyMaxLabel"></span>
+            </div>
+            <svg viewBox="0 0 100 40" preserveAspectRatio="none" class="w-full h-40" role="img" aria-label="Minutes of speech per day" x-html="barsSvg"></svg>
+            <div class="flex justify-between text-[10px] text-slate-400 mt-1 tabular-nums">
+                <span x-text="daily[0]?.day || ''"></span><span x-text="daily[daily.length - 1]?.day || ''"></span>
+            </div>
+        </div>
+
+        <!-- Where -->
+        <div class="card p-4 sm:p-5">
+            <h2 class="font-semibold mb-3">Where</h2>
+            <ul class="flex flex-col gap-2.5">
+                <template x-for="l in perLocation" :key="l.camera">
+                    <li class="text-sm">
+                        <div class="flex justify-between gap-2"><span x-text="l.camera"></span><span class="text-slate-500 tabular-nums" x-text="speechTotal(l.seconds)"></span></div>
+                        <div class="h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 mt-1 overflow-hidden"><div class="h-full bg-teal-500 rounded-full" :style="'width:' + (l.seconds / locationMax * 100) + '%'"></div></div>
+                    </li>
+                </template>
+            </ul>
+        </div>
+    </div>
+    <p x-show="loading" class="text-sm text-slate-500 text-center py-6">Loading…</p>
+</section>

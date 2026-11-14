@@ -26,6 +26,9 @@ _DEFAULT_SETTINGS: dict[str, str] = {
     "ollama_model": OLLAMA_MODEL,
     # Language the AI summaries are written in (free text, passed to the LLM)
     "summary_language": "English",
+    # Keyword alerts (comma-separated words; URL receives a POST, e.g. an ntfy topic)
+    "alert_keywords": "",
+    "alert_url": "",
     # Noise / silence pre-filter: minimum RMS energy (0-1 normalised)
     "min_audio_energy": "0.005",
     # Audio compression: compress WAV to Opus/OGG after N days (0 = disabled)
@@ -181,6 +184,15 @@ def init_database() -> None:
         ("refetch", "INTEGER DEFAULT 0"),
         # UTC 'YYYY-MM-DDTHH:MM:SS' of the last final result (rate / ETA, "re-transcribed")
         ("processed_at", "TEXT"),
+        # User curation: star + note, and hand-corrected text. While edited_at is
+        # set, re-transcription stores the machine text in original_transcription
+        # and leaves the user's text alone.
+        ("starred", "INTEGER DEFAULT 0"),
+        ("note", "TEXT"),
+        ("edited_at", "TEXT"),
+        ("original_transcription", "TEXT"),
+        # 1 = asked for by hand; processed ahead of any backlog
+        ("priority", "INTEGER DEFAULT 0"),
     ):
         if name not in columns:
             logger.info("Migrating database: adding transcriptions.%s", name)

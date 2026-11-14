@@ -1,0 +1,97 @@
+<section x-data="dayPage" class="max-w-5xl mx-auto flex flex-col gap-5"
+    @shortcut:next.window="active && step(1)" @shortcut:prev.window="active && step(-1)"
+    @shortcut:next-day.window="active && shiftDay(1)" @shortcut:prev-day.window="active && shiftDay(-1)">
+
+    <!-- Header: date + navigation -->
+    <header class="flex flex-wrap items-end gap-3">
+        <div class="mr-auto">
+            <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400" x-text="date === today() || dayTitle(date) === 'Yesterday' ? longDate(date) : ''"></p>
+            <h1 class="text-2xl font-semibold tracking-tight" x-text="dayTitle(date)"></h1>
+            <p class="text-sm text-slate-500 dark:text-slate-400 tabular-nums" x-show="!loading">
+                <span x-text="visible.filter(c => c.status === 'completed').length"></span> conversations ·
+                <span x-text="speechTotal(speechSeconds)"></span> of speech
+            </p>
+        </div>
+        <div class="flex items-center gap-1.5">
+            <button type="button" class="icon-btn border border-slate-200 dark:border-slate-700" @click="shiftDay(-1)" title="Previous day (←)" aria-label="Previous day"><span x-html="$icon('chevron-left')"></span></button>
+            <label class="sr-only" for="day-picker">Pick a date</label>
+            <input id="day-picker" type="date" class="field w-auto" :value="date" :max="today()" @change="pickDate($event.target.value)">
+            <button type="button" class="icon-btn border border-slate-200 dark:border-slate-700" @click="shiftDay(1)" :disabled="date >= today()" title="Next day (→)" aria-label="Next day"><span x-html="$icon('chevron-right')"></span></button>
+            <button type="button" class="btn" @click="goToday()" x-show="date !== today()">Today</button>
+        </div>
+    </header>
+
+    <!-- Day at a glance: one row per location on a 24 h axis -->
+    <div class="card p-4">
+        <div class="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-1.5 text-xs">
+            <template x-for="name in locations" :key="name">
+                <div class="contents">
+                    <button type="button" @click="toggleLocation(name)"
+                        class="text-left truncate py-1 rounded"
+                        :class="location === name ? 'text-teal-700 dark:text-teal-300 font-semibold' : lane(name).length ? 'text-slate-700 dark:text-slate-300' : 'text-slate-400 dark:text-slate-600'"
+                        :title="location === name ? 'Show all locations' : 'Only show ' + name" x-text="name"></button>
+                    <div class="lane">
+                        <template x-for="c in lane(name)" :key="c.id">
+                            <button type="button" class="lane-block" :style="blockStyle(c)"
+                                :class="{
+                                    'is-selected': $store.ui.clipId === c.id,
+                                    'is-pending': c.status === 'pending' || c.status === 'processing',
+                                    'is-hidden': ['error','filtered','archived'].includes(c.status),
+                                }"
+                                @click="$store.ui.openClip(c.id)"
+                                :title="clock(c.timestamp) + ' · ' + duration(c.duration_seconds) + (c.transcription ? ' · ' + c.transcription.slice(0, 80) : '')"
+                                :aria-label="'Clip at ' + clock(c.timestamp) + ', ' + name"></button>
+                        </template>
+                    </div>
+                </div>
+            </template>
+            <div></div>
+            <div class="relative h-4 text-[10px] text-slate-400 dark:text-slate-500 tabular-nums">
+                <template x-for="h in [0,3,6,9,12,15,18,21,24]" :key="h">
+                    <span class="absolute -translate-x-1/2" :style="'left:' + (h / 24 * 100) + '%'" x-text="String(h).padStart(2,'0')"></span>
+                </template>
+            </div>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 mt-3 text-xs text-slate-500 dark:text-slate-400">
+            <span x-show="location" class="chip chip-on">
+                <span x-text="location"></span>
+                <button type="button" @click="location = ''" aria-label="Show all locations" x-html="$icon('x','w-3 h-3')"></button>
+            </span>
+            <label class="ml-auto inline-flex items-center gap-2 cursor-pointer" x-show="hiddenCount">
+                <input type="checkbox" x-model="showHidden" class="accent-teal-600">
+                Show <span x-text="hiddenCount"></span> without speech or failed
+            </label>
+        </div>
+    </div>
+
+    <!-- Clip list -->
+    <div class="card divide-y divide-slate-100 dark:divide-slate-800" x-show="!loading && visible.length">
+        <template x-for="c in visible" :key="c.id">
+            <button type="button" :id="'row-' + c.id" @click="$store.ui.openClip(c.id)"
+                class="clip-row" :class="$store.ui.clipId === c.id && 'is-selected'">
+                <span class="font-mono text-sm text-slate-500 dark:text-slate-400 tabular-nums pt-0.5" x-text="clock(c.timestamp)"></span>
+                <span class="min-w-0">
+                    <span class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 mb-0.5">
+                        <span x-text="c.camera_name"></span>
+                        <span x-show="c.duration_seconds" class="tabular-nums" x-text="'· ' + duration(c.duration_seconds)"></span>
+                        <span x-show="c.starred" class="text-amber-500" x-html="$icon('star','w-3.5 h-3.5 fill-current')" title="Saved"></span>
+                        <span x-show="c.edited_at" class="badge">edited</span>
+                        <span x-show="c.status === 'pending' || c.status === 'processing'" class="badge badge-wait" x-text="c.status === 'processing' ? 'transcribing' : 'queued'"></span>
+                        <span x-show="['error','filtered','archived'].includes(c.status)" class="badge badge-muted" x-text="c.status === 'filtered' ? 'no speech' : 'failed'"></span>
+                    </span>
+                    <span class="line-clamp-2 text-[15px] leading-snug"
+                        :class="c.status === 'completed' ? '' : 'text-slate-500 dark:text-slate-400'"
+                        x-text="preview(c)"></span>
+                </span>
+            </button>
+        </template>
+    </div>
+
+    <!-- States -->
+    <div x-show="loading" class="text-sm text-slate-500 dark:text-slate-400 py-12 text-center">Loading the day…</div>
+    <div x-show="!loading && !visible.length" x-cloak class="card p-10 text-center">
+        <p class="font-medium" x-text="clips.length ? 'Nothing to show with these filters' : 'No speech was recorded on this day'"></p>
+        <p class="text-sm text-slate-500 dark:text-slate-400 mt-1" x-show="!clips.length">Try another day with the arrows above, or search all conversations.</p>
+        <button type="button" class="btn mt-4" x-show="clips.length" @click="location = ''; showHidden = true">Show everything</button>
+    </div>
+</section>

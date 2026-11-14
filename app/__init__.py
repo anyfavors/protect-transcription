@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from app.routes import (
     settings,
     summaries,
     sync,
+    system,
     transcriptions,
     webhook,
     ws,
@@ -133,7 +135,8 @@ app = FastAPI(
 
 app.add_middleware(RequestIdMiddleware)
 
-# Static files (JS, CSS assets)
+# Static files (JS, CSS assets). The web app manifest needs its own MIME type.
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 if _STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
@@ -147,6 +150,7 @@ for _router in (
     settings.router,
     summaries.router,
     sync.router,
+    system.router,
     analytics.router,
     export.router,
     ws.router,

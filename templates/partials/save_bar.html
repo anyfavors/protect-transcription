@@ -1,0 +1,5 @@
+<div class="flex items-center justify-end gap-2" x-show="dirty(tab)" x-transition>
+    <span class="text-sm text-slate-500 dark:text-slate-400 mr-auto">You have unsaved changes.</span>
+    <button type="button" class="btn" @click="reset(tab)">Discard</button>
+    <button type="button" class="btn btn-primary" @click="save(tab)" :disabled="busy === 'save'"><span x-html="$icon('save')"></span><span x-text="busy === 'save' ? 'Saving…' : 'Save'"></span></button>
+</div>
