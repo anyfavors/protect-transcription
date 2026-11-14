@@ -134,7 +134,7 @@ async def test_ongoing_event_is_deferred(tmp_db, monkeypatch):
 
 
 async def test_clip_spans_event_plus_buffers(tmp_db, monkeypatch):
-    start = datetime(2026, 11, 14, 12, 0, 0, tzinfo=LOCAL_TZ)
+    start = (datetime.now(tz=LOCAL_TZ) - timedelta(hours=1)).replace(microsecond=0)
     end = start + timedelta(seconds=40)
     row = _row(tmp_db, timestamp=(start + timedelta(seconds=14)).isoformat())
     _fake_protect(monkeypatch, _Event(start, end))
@@ -150,6 +150,19 @@ async def test_clip_spans_event_plus_buffers(tmp_db, monkeypatch):
     assert windows == [(start - timedelta(seconds=5), end + timedelta(seconds=10))]
     stored = _get(tmp_db, row["id"])
     assert (stored["status"], stored["attempts"]) == ("pending", 1)  # backoff, not error
+
+
+async def test_old_footage_missing_fails_without_retry(tmp_db, monkeypatch):
+    start = datetime.now(tz=LOCAL_TZ) - timedelta(days=30)
+    row = _row(tmp_db, timestamp=start.isoformat())
+    _fake_protect(monkeypatch, _Event(start, start + timedelta(seconds=20)))
+
+    async def no_video(*_a):
+        return None
+
+    monkeypatch.setattr(wk, "fetch_audio_clip", no_video)
+    await wk.process_pending_transcription(row)
+    assert _get(tmp_db, row["id"])["status"] == "error"
 
 
 def test_retry_gives_up_after_max_attempts(tmp_db):

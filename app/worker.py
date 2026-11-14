@@ -93,6 +93,8 @@ _RECORDING_SETTLE_SECONDS = 15
 # Transient failures (NVR / speaches unreachable) are retried with backoff.
 _MAX_ATTEMPTS = 5
 _RETRY_BASE_MINUTES = 5
+# Failed NVR downloads are only retried for events younger than this.
+_RETRY_FETCH_WINDOW = timedelta(days=1)
 
 
 def _parse_local(value: str) -> datetime:
@@ -189,6 +191,9 @@ async def process_pending_transcription(row: dict) -> None:
             _set(record_id, timestamp=start.isoformat(), event_end=end.isoformat())
             timestamp_str = start.isoformat()
         elif not has_cache:
+            # Retrying only helps for recent events (NVR blip); old footage is gone for good.
+            if now - start > _RETRY_FETCH_WINDOW:
+                attempts = _MAX_ATTEMPTS
             _retry_or_fail(record_id, attempts, "Failed to fetch audio", None)
             await _broadcast_update(record_id, "error", camera_name, timestamp_str)
             return
