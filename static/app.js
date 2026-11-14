@@ -4,7 +4,7 @@ function transcribeApp() {
         transcriptions: [],
         cameras: [],
         dates: [],
-        stats: { total: 0, completed: 0, processing: 0, errors: 0, filtered: 0, today: 0 },
+        stats: { total: 0, completed: 0, processing: 0, queued: 0, errors: 0, filtered: 0, today: 0, rate_per_hour: 0, eta_seconds: null },
         filters: { search: '', camera: '', date: '', status: '' },
         pagination: { page: 1, per_page: 20, total: 0, pages: 0 },
         confirmModal: { show: false, action: '', title: '', message: '', item: null, loading: false },
@@ -99,9 +99,7 @@ function transcribeApp() {
                 this._ws.onmessage = (e) => {
                     try {
                         const msg = JSON.parse(e.data);
-                        if (msg.type === 'transcription_update') {
-                            this.loadAll();
-                        }
+                        if (msg.type === 'transcription_update') this._queueQuietRefresh();
                     } catch { /* ignore */ }
                 };
                 this._ws.onclose = () => {
@@ -112,19 +110,33 @@ function transcribeApp() {
             } catch { /* WebSocket not available, rely on polling */ }
         },
 
-        schedulePoll() {
-            if (this._pollTimer) clearTimeout(this._pollTimer);
-            const hasActive = this.stats.processing > 0 || this.transcriptions.some(t => t.status === 'pending' || t.status === 'processing');
-            const interval = hasActive ? 5000 : 30000;
-            this._pollTimer = setTimeout(() => this.refresh(), interval);
+        // Background refresh: at most one every 3 s, no spinner, selection kept.
+        _queueQuietRefresh() {
+            if (this._quietTimer) return;
+            this._quietTimer = setTimeout(async () => {
+                this._quietTimer = null;
+                await this.loadAll({ quiet: true });
+            }, 3000);
         },
 
-        async loadAll() {
+        schedulePoll() {
+            if (this._pollTimer) clearTimeout(this._pollTimer);
+            // The WebSocket pushes changes; polling is only a fallback.
+            const wsOpen = this._ws && this._ws.readyState === WebSocket.OPEN;
+            const busy = this.stats.processing > 0 || this.stats.queued > 0;
+            const interval = !wsOpen && busy ? 10000 : 60000;
+            this._pollTimer = setTimeout(async () => {
+                await this.loadAll({ quiet: true });
+                this.schedulePoll();
+            }, interval);
+        },
+
+        async loadAll({ quiet = false } = {}) {
             await Promise.all([
                 this.loadStats(),
                 this.loadCameras(),
                 this.loadDates(),
-                this.loadTranscriptions()
+                this.loadTranscriptions({ quiet })
             ]);
         },
 
@@ -145,9 +157,8 @@ function transcribeApp() {
             catch (e) { console.error(e); }
         },
 
-        async loadTranscriptions() {
-            this.loading = true;
-            this.selectedIds = [];
+        async loadTranscriptions({ quiet = false } = {}) {
+            if (!quiet) { this.loading = true; this.selectedIds = []; }
             try {
                 const p = new URLSearchParams({ page: this.pagination.page, per_page: this.pagination.per_page });
                 if (this.filters.search) p.append('search', this.filters.search);
@@ -156,6 +167,10 @@ function transcribeApp() {
                 if (this.filters.status) p.append('status', this.filters.status);
                 const data = await (await fetch(`/api/transcriptions?${p}`)).json();
                 this.transcriptions = data.transcriptions;
+                if (quiet) {
+                    const ids = new Set(data.transcriptions.map(t => t.id));
+                    this.selectedIds = this.selectedIds.filter(id => ids.has(id));
+                }
                 this.pagination.total = data.total;
                 this.pagination.pages = data.pages;
             } catch (e) { console.error(e); }
@@ -179,12 +194,12 @@ function transcribeApp() {
             const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
             if (date.toDateString() === today.toDateString()) return 'Today';
             if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
-            return date.toLocaleDateString('da-DK', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+            return date.toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
         },
 
         formatTime(timestamp) {
             if (!timestamp) return '';
-            return new Date(timestamp).toLocaleTimeString('da-DK', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            return new Date(timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
         },
 
         formatRelativeTime(timestamp) {
@@ -200,7 +215,7 @@ function transcribeApp() {
 
         formatFullTimestamp(timestamp) {
             if (!timestamp) return '';
-            return new Date(timestamp).toLocaleString('da-DK', {
+            return new Date(timestamp).toLocaleString('en-GB', {
                 weekday: 'short', year: 'numeric', month: 'short',
                 day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'
             });
@@ -282,19 +297,58 @@ function transcribeApp() {
             return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
         },
 
+        escapeHtml(text) {
+            return String(text ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        },
+
+        // Result is used with x-html: escape first, then add <mark>.
         highlightSearch(text) {
-            if (!text || !this.filters.search) return text;
-            const re = new RegExp(`(${this.filters.search.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
-            return text.replace(re, '<mark>$1</mark>');
+            const safe = this.escapeHtml(text);
+            if (!safe || !this.filters.search) return safe;
+            const term = this.escapeHtml(this.filters.search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            return safe.replace(new RegExp(`(${term})`, 'gi'), '<mark>$1</mark>');
+        },
+
+        // Minimal Markdown for LLM summaries: headings, bold, bullet lists. Escapes first.
+        renderMarkdown(text) {
+            const out = [];
+            let inList = false;
+            for (const raw of this.escapeHtml(text).split('\n')) {
+                const line = raw.trim().replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+                const bullet = line.match(/^[-*•]\s+(.*)/);
+                if (bullet) {
+                    if (!inList) { out.push('<ul class="list-disc pl-5 space-y-1">'); inList = true; }
+                    out.push(`<li>${bullet[1]}</li>`);
+                    continue;
+                }
+                if (inList) { out.push('</ul>'); inList = false; }
+                const heading = line.match(/^#{1,6}\s+(.*)/);
+                if (heading) out.push(`<p class="font-semibold mt-3">${heading[1]}</p>`);
+                else if (line) out.push(`<p class="mt-2">${line}</p>`);
+            }
+            if (inList) out.push('</ul>');
+            return out.join('');
+        },
+
+        localToday() {
+            const d = new Date();
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        },
+
+        formatEta(seconds) {
+            if (!seconds) return '';
+            if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))} min`;
+            const h = Math.round(seconds / 3600);
+            return h < 48 ? `${h} h` : `${Math.floor(h / 24)} d ${h % 24} h`;
         },
 
         setQuickFilter(filter) {
             this.filters.date = '';
             this.filters.status = '';
-            const today = new Date().toISOString().split('T')[0];
-            if (filter === 'today') this.filters.date = today;
+            if (filter === 'today') this.filters.date = this.localToday();
             else if (filter === 'errors') this.filters.status = 'error';
             else if (filter === 'processing') this.filters.status = 'processing';
+            else if (filter === 'queued') this.filters.status = 'pending';
             this.pagination.page = 1;
             this.loadTranscriptions();
         },

@@ -17,7 +17,7 @@ async def hourly_activity(days: int = Query(30, ge=1, le=365)):
     try:
         cursor.execute(
             """
-            SELECT CAST(strftime('%H', timestamp) AS INTEGER) AS hour, COUNT(*) AS count
+            SELECT CAST(substr(timestamp, 12, 2) AS INTEGER) AS hour, COUNT(*) AS count
             FROM transcriptions
             WHERE status IN ('completed', 'filtered')
               AND timestamp >= datetime('now', 'localtime', ?)
@@ -40,7 +40,7 @@ async def daily_activity(days: int = Query(30, ge=1, le=365)):
     try:
         cursor.execute(
             """
-            SELECT DATE(timestamp) AS day,
+            SELECT substr(timestamp, 1, 10) AS day,
                    COUNT(*) AS total,
                    SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed,
                    SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors,

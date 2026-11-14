@@ -45,10 +45,10 @@ def _build_export_query(
         where.append("camera_name = ?")
         params.append(camera)
     if date_from:
-        where.append("DATE(timestamp) >= ?")
+        where.append("substr(timestamp, 1, 10) >= ?")
         params.append(date_from)
     if date_to:
-        where.append("DATE(timestamp) <= ?")
+        where.append("substr(timestamp, 1, 10) <= ?")
         params.append(date_to)
     if status:
         where.append("status = ?")

@@ -92,7 +92,7 @@ def _query_transcriptions(
         where.append("t.camera_name = ?")
         params.append(camera)
     if date:
-        where.append("DATE(t.timestamp) = ?")
+        where.append("substr(t.timestamp, 1, 10) = ?")
         params.append(date)
     if status:
         where.append("t.status = ?")
@@ -202,7 +202,7 @@ async def get_dates():
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "SELECT DISTINCT DATE(timestamp) AS date FROM transcriptions "
+            "SELECT DISTINCT substr(timestamp, 1, 10) AS date FROM transcriptions "
             "WHERE timestamp IS NOT NULL ORDER BY date DESC LIMIT 90"
         )
         return {"dates": [row[0] for row in cursor.fetchall()]}
@@ -212,38 +212,40 @@ async def get_dates():
 
 @router.get("/api/stats")
 async def get_stats():
-    """Status counters. 'today' is computed in LOCAL_TZ."""
+    """Status counters plus queue progress. 'today' is the local date."""
     from datetime import datetime as _dt
 
     today_local = _dt.now(tz=LOCAL_TZ).strftime("%Y-%m-%d")
     conn = get_connection()
-    cursor = conn.cursor()
     try:
-        cursor.execute("SELECT COUNT(*) FROM transcriptions")
-        total = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM transcriptions WHERE status='completed'")
-        completed = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM transcriptions WHERE status='processing'")
-        processing = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM transcriptions WHERE status='error'")
-        errors = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM transcriptions WHERE status='filtered'")
-        filtered = cursor.fetchone()[0]
-        cursor.execute(
-            "SELECT COUNT(*) FROM transcriptions WHERE DATE(timestamp) = ?",
+        cur = conn.cursor()
+        cur.execute("SELECT status, COUNT(*) FROM transcriptions GROUP BY status")
+        by_status = dict(cur.fetchall())
+        cur.execute(
+            "SELECT COUNT(*) FROM transcriptions WHERE substr(timestamp, 1, 10) = ?",
             (today_local,),
         )
-        today = cursor.fetchone()[0]
-        return {
-            "total": total,
-            "completed": completed,
-            "processing": processing,
-            "errors": errors,
-            "filtered": filtered,
-            "today": today,
-        }
+        today = cur.fetchone()[0]
+        cur.execute(
+            "SELECT COUNT(*) FROM transcriptions "
+            "WHERE processed_at >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-1 hour')"
+        )
+        rate_per_hour = cur.fetchone()[0]
     finally:
         conn.close()
+
+    queued = by_status.get("pending", 0)
+    return {
+        "total": sum(by_status.values()),
+        "completed": by_status.get("completed", 0),
+        "processing": by_status.get("processing", 0),
+        "queued": queued,
+        "errors": by_status.get("error", 0),
+        "filtered": by_status.get("filtered", 0),
+        "today": today,
+        "rate_per_hour": rate_per_hour,
+        "eta_seconds": round(queued / rate_per_hour * 3600) if queued and rate_per_hour else None,
+    }
 
 
 @router.delete("/api/transcriptions/{transcription_id}", dependencies=[Depends(require_api_token)])

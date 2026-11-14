@@ -278,3 +278,30 @@ def test_srt_download(client, tmp_db):
 def test_srt_not_found(client):
     r = client.get("/api/transcriptions/9999/srt")
     assert r.status_code == 404
+
+
+def test_stats_queue_progress_and_local_today(client, tmp_db):
+    from datetime import datetime
+
+    from app.config import LOCAL_TZ
+
+    # 00:30 local is the previous day in UTC; it must still count as "today".
+    today = datetime.now(tz=LOCAL_TZ).strftime("%Y-%m-%d")
+    _insert_transcription(tmp_db, event_id="p1", status="pending")
+    _insert_transcription(tmp_db, event_id="p2", status="pending")
+    conn = sqlite3.connect(tmp_db)
+    conn.execute(
+        "UPDATE transcriptions SET timestamp=? WHERE event_id='p1'", (f"{today}T00:30:00+01:00",)
+    )
+    conn.execute(
+        "UPDATE transcriptions SET processed_at=strftime('%Y-%m-%dT%H:%M:%S','now') "
+        "WHERE event_id='p2'"
+    )
+    conn.commit()
+    conn.close()
+
+    data = client.get("/api/stats").json()
+    assert data["queued"] == 2
+    assert data["rate_per_hour"] == 1
+    assert data["eta_seconds"] == 7200
+    assert data["today"] >= 1

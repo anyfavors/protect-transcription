@@ -306,6 +306,7 @@ def _finish(
         attempts=0,
         next_attempt_at=None,
         refetch=0,
+        processed_at=_utc_stamp(datetime.now(tz=LOCAL_TZ)),
         **extra,
     )
 
@@ -334,6 +335,7 @@ def _retry_or_fail(record_id: int, attempts: int, message: str, audio_filename: 
         attempts=attempts,
         next_attempt_at=None,
         refetch=0,
+        processed_at=_utc_stamp(datetime.now(tz=LOCAL_TZ)),
     )
     return "error"
 

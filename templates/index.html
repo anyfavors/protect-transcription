@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<html lang="da" class="dark">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Protect Transcribe</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Crect x='12' y='6' width='8' height='14' rx='4' fill='white'/%3E%3Cpath d='M9 15a7 7 0 0 0 14 0M16 22v4' stroke='white' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
     <!-- Apply saved theme before Alpine loads to avoid flash -->
     <script>
         if (localStorage.getItem('theme') === 'light') {
@@ -97,6 +98,16 @@
             <span class="font-bold text-yellow-600" :class="filters.status === 'processing' ? '!text-white' : ''" x-text="stats.processing"></span>
             <span class="opacity-75">processing</span>
         </button>
+        <button x-show="stats.queued > 0" x-cloak @click="setQuickFilter('queued')"
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition border"
+            :class="filters.status === 'pending'
+                ? 'bg-sky-600 text-white border-sky-600'
+                : 'bg-white dark:bg-gray-800 border-sky-200 dark:border-sky-900 text-sky-700 dark:text-sky-300 hover:border-sky-400'">
+            <i class="fas fa-hourglass-half text-xs" aria-hidden="true"></i>
+            <span class="font-bold" x-text="stats.queued.toLocaleString('en-GB')"></span>
+            <span class="opacity-75">queued</span>
+            <span x-show="stats.eta_seconds" class="opacity-75" x-text="'· ' + stats.rate_per_hour + '/h · ~' + formatEta(stats.eta_seconds) + ' left'"></span>
+        </button>
         <button x-show="stats.errors > 0" @click="setQuickFilter('errors')"
             class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition border"
             :class="filters.status === 'error'
@@ -117,10 +128,10 @@
         </button>
         <button @click="setQuickFilter('today')"
             class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition border"
-            :class="filters.date === new Date().toISOString().split('T')[0]
+            :class="filters.date === localToday()
                 ? 'bg-purple-600 text-white border-purple-600'
                 : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:border-purple-400'">
-            <span class="font-bold text-purple-600" :class="filters.date === new Date().toISOString().split('T')[0] ? '!text-white' : ''" x-text="stats.today"></span>
+            <span class="font-bold text-purple-600" :class="filters.date === localToday() ? '!text-white' : ''" x-text="stats.today"></span>
             <span class="opacity-75">today</span>
         </button>
 
@@ -320,7 +331,6 @@
                                             <i class="fas fa-stopwatch text-[10px]"></i>
                                             <span x-text="formatDuration(item.duration_seconds)"></span>
                                         </span>
-                                        <span x-show="item.language" class="text-xs text-gray-400 dark:text-gray-600 uppercase" x-text="item.language"></span>
                                     </div>
 
                                     <!-- Completed: segments or plain text -->
@@ -343,13 +353,6 @@
                                                             :title="'Jump to ' + formatSegmentTime(seg.start)"
                                                             @click="seekAudio(item.id, seg.start)"
                                                             x-text="formatSegmentTime(seg.start)"></span>
-                                                        <span x-show="seg.speaker"
-                                                            class="text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 shrink-0"
-                                                            :class="{'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300': seg.speaker === 'SPEAKER_00',
-                                                                     'bg-sky-100 dark:bg-sky-900/40 text-sky-700 dark:text-sky-300': seg.speaker === 'SPEAKER_01',
-                                                                     'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300': seg.speaker === 'SPEAKER_02',
-                                                                     'bg-pink-100 dark:bg-pink-900/40 text-pink-700 dark:text-pink-300': seg.speaker !== 'SPEAKER_00' && seg.speaker !== 'SPEAKER_01' && seg.speaker !== 'SPEAKER_02'}"
-                                                            x-text="seg.speaker?.replace('SPEAKER_0','S')?.replace('SPEAKER_','S')"></span>
                                                         <span class="transition-colors"
                                                             :class="isSegmentActive(item.id, seg.start, seg.end)
                                                                 ? 'text-blue-900 dark:text-blue-100 font-medium'
@@ -1082,7 +1085,7 @@
                                     <span x-text="item.generating ? 'Generating…' : (item.summary ? 'Regenerate' : 'Generate')"></span>
                                 </button>
                             </div>
-                            <div x-show="item.summary" class="px-4 py-3 text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap leading-relaxed" x-text="item.summary"></div>
+                            <div x-show="item.summary" class="px-4 py-3 text-sm text-gray-700 dark:text-gray-300 leading-relaxed" x-html="renderMarkdown(item.summary)"></div>
                             <div x-show="!item.summary && !item.generating" class="px-4 py-3 text-sm text-gray-400 dark:text-gray-600 italic">No summary yet — click Generate.</div>
                             <div x-show="item.generating" class="px-4 py-3 text-sm text-indigo-500 dark:text-indigo-400">
                                 <i class="fas fa-spinner fa-spin mr-1"></i>Asking Ollama, this may take a moment…
@@ -1112,7 +1115,7 @@
                 </div>
                 <!-- Tabs -->
                 <div class="flex border-b border-gray-200 dark:border-gray-700 flex-shrink-0 overflow-x-auto">
-                    <template x-for="tab in [{id:'hourly',icon:'fa-clock',label:'Hourly'},{id:'daily',icon:'fa-calendar-day',label:'Daily'},{id:'cameras',icon:'fa-video',label:'Cameras'},{id:'languages',icon:'fa-language',label:'Languages'}]" :key="tab.id">
+                    <template x-for="tab in [{id:'hourly',icon:'fa-clock',label:'Hourly'},{id:'daily',icon:'fa-calendar-day',label:'Daily'},{id:'cameras',icon:'fa-video',label:'Cameras'}]" :key="tab.id">
                         <button @click="analyticsTab = tab.id; loadAnalytics()"
                             class="px-4 py-3 text-sm font-medium whitespace-nowrap transition border-b-2 -mb-px"
                             :class="analyticsTab === tab.id
@@ -1197,7 +1200,6 @@
                                         <th class="text-right py-2 font-medium">Errors</th>
                                         <th class="text-right py-2 font-medium">Filtered</th>
                                         <th class="text-right py-2 font-medium">Avg duration</th>
-                                        <th class="text-right py-2 font-medium">Avg confidence</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -1209,28 +1211,10 @@
                                             <td class="py-2 text-right text-red-500" x-text="cam.errors"></td>
                                             <td class="py-2 text-right text-gray-400" x-text="cam.filtered"></td>
                                             <td class="py-2 text-right" x-text="cam.avg_duration ? cam.avg_duration + 's' : '—'"></td>
-                                            <td class="py-2 text-right" x-text="cam.avg_confidence ? (cam.avg_confidence * 100).toFixed(1) + '%' : '—'"></td>
                                         </tr>
                                     </template>
                                 </tbody>
                             </table>
-                        </div>
-                    </div>
-
-                    <!-- ── Languages ── -->
-                    <div x-show="!analyticsLoading && analyticsTab === 'languages' && analyticsData?.languages">
-                        <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Language distribution</h3>
-                        <div class="space-y-2">
-                            <template x-for="l in analyticsData?.languages || []" :key="l.language">
-                                <div class="flex items-center gap-3">
-                                    <span class="text-sm font-medium text-gray-700 dark:text-gray-300 w-12 uppercase" x-text="l.language"></span>
-                                    <div class="flex-1 h-6 bg-gray-100 dark:bg-gray-700 rounded overflow-hidden">
-                                        <div class="h-full bg-indigo-500 dark:bg-indigo-600 rounded transition-all duration-300"
-                                            :style="'width:' + barPercent(l.count, maxOf(analyticsData.languages, 'count')) + '%'"></div>
-                                    </div>
-                                    <span class="text-sm text-gray-500 dark:text-gray-400 w-12 text-right" x-text="l.count"></span>
-                                </div>
-                            </template>
                         </div>
                     </div>
 

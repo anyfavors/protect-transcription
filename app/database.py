@@ -179,6 +179,8 @@ def init_database() -> None:
         ("next_attempt_at", "TEXT"),  # UTC 'YYYY-MM-DDTHH:MM:SS'; NULL = ready now
         # 1 = re-download audio from the NVR (fall back to cached file if gone)
         ("refetch", "INTEGER DEFAULT 0"),
+        # UTC 'YYYY-MM-DDTHH:MM:SS' of the last final result (rate / ETA, "re-transcribed")
+        ("processed_at", "TEXT"),
     ):
         if name not in columns:
             logger.info("Migrating database: adding transcriptions.%s", name)
