@@ -9,6 +9,8 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
+from uiprotect.data import EventType, SmartDetectObjectType
+
 from app.config import LOCAL_TZ
 from app.database import get_connection, get_settings
 from app.protect import get_protect_client, get_protect_host
@@ -67,61 +69,43 @@ async def _run_sync_impl(hours: int) -> dict:
     errors: list[str] = []
 
     try:
-        events = await client.get_events(start=start_time, end=end_time)
+        # Filter on the NVR: only speech (alrmSpeak) smart-audio events. Raw dicts
+        # (ms timestamps, camera id) avoid parsing every event into models.
+        events = await client.get_events_raw(
+            start=start_time,
+            end=end_time,
+            types=[EventType.SMART_AUDIO_DETECT],
+            smart_detect_types=[SmartDetectObjectType.SPEAK],
+        )
 
         for event in events:
             events_found += 1
-            event_type = getattr(event, "type", None)
-            if event_type:
-                all_event_types.add(str(event_type))
-
-            smart_detect_types = getattr(event, "smart_detect_types", None)
-            if smart_detect_types is None:
-                continue
-
-            smart_types_str = []
-            for t in smart_detect_types:
-                if hasattr(t, "value"):
-                    s = str(t.value).lower()
-                elif hasattr(t, "name"):
-                    s = str(t.name).lower()
-                else:
-                    s = str(t).lower()
-                smart_types_str.append(s)
-                all_smart_types.add(s)
-
-            if not any(s in {"alrmspeak", "speech", "speechdetect"} for s in smart_types_str):
-                continue
-
+            all_event_types.add(str(event.get("type")))
+            all_smart_types.update(str(t).lower() for t in event.get("smartDetectTypes") or [])
             speech_events_found += 1
 
-            if getattr(event, "end", None) is None:
+            if event.get("end") is None:
                 events_live_skipped += 1
                 continue
 
-            event_id = str(event.id)
+            event_id = str(event["id"])
             if event_id in existing_events:
                 events_skipped += 1
                 continue
 
-            camera_id = getattr(event, "camera_id", None)
-            if not camera_id:
-                cam = getattr(event, "camera", None)
-                camera_id = cam.id if cam else None
-            if not camera_id:
+            camera_id = event.get("camera")
+            timestamp_ms = event.get("start")
+            if not camera_id or not timestamp_ms:
                 continue
-
-            event_time = getattr(event, "start", None)
-            if not event_time:
-                continue
-            timestamp_ms = int(event_time.timestamp() * 1000)
 
             camera = client.bootstrap.cameras.get(camera_id)
             camera_name: str = (
                 (camera.name or f"Unknown ({camera_id})") if camera else f"Unknown ({camera_id})"
             )
 
-            if queue_transcription(event_id, str(camera_id), camera_name, timestamp_ms, language):
+            if queue_transcription(
+                event_id, str(camera_id), camera_name, int(timestamp_ms), language
+            ):
                 events_queued += 1
                 existing_events.add(event_id)
 

@@ -172,3 +172,39 @@ async def test_claim_prefers_new_events(tmp_db):
     conn.close()
     assert (await wk._claim_next_pending())["id"] == new["id"]
     assert (await wk._claim_next_pending())["id"] == old["id"]
+
+
+# ── sync against a fake NVR ─────────────────────────────────────────────────
+
+
+async def test_sync_queues_finished_speech_events(tmp_db, monkeypatch):
+    ss = importlib.import_module("app.sync_service")
+
+    class Cam:
+        name = "Indgang"
+
+    class Client:
+        def __init__(self):
+            self.bootstrap = type("Bootstrap", (), {})()
+            self.bootstrap.cameras = {"cam1": Cam()}
+
+        async def get_events_raw(self, **kwargs):
+            assert [t.value for t in kwargs["smart_detect_types"]] == ["alrmSpeak"]
+            base = {"type": "smartAudioDetect", "camera": "cam1", "smartDetectTypes": ["alrmSpeak"]}
+            return [
+                {**base, "id": "a" * 24, "start": 1794551068229, "end": 1794551097224},
+                {**base, "id": "b" * 24, "start": 1794551068229, "end": None},  # ongoing
+            ]
+
+    async def get_client():
+        return Client()
+
+    monkeypatch.setattr(ss, "get_protect_client", get_client)
+    monkeypatch.setattr(ss, "get_protect_host", lambda: "nvr")
+    out = await ss.run_sync(hours=1)
+    assert (out["events_queued"], out["events_live_skipped"]) == (1, 1)
+    conn = sqlite3.connect(tmp_db)
+    assert conn.execute("SELECT event_id, camera_name FROM transcriptions").fetchall() == [
+        ("a" * 24, "Indgang")
+    ]
+    conn.close()
