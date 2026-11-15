@@ -13,7 +13,7 @@ const TABS = [
 // Which setting keys each tab saves.
 const TAB_KEYS = {
     recording: ['protect_host', 'protect_verify_ssl', 'buffer_before', 'buffer_after', 'min_audio_energy', 'audio_compression_days', 'auto_sync_interval_minutes', 'auto_sync_hours', 'processing_timeout_minutes'],
-    transcription: ['whisper_model', 'language', 'vad_filter'],
+    transcription: ['whisper_model', 'language', 'vad_filter', 'transcription_workers'],
     summaries: ['ollama_url', 'ollama_model', 'summary_language', 'auto_summary_time'],
     alerts: ['alert_keywords', 'alert_url'],
 };

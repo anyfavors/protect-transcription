@@ -221,3 +221,27 @@ async def test_sync_queues_finished_speech_events(tmp_db, monkeypatch):
         ("a" * 24, "Indgang")
     ]
     conn.close()
+
+
+async def test_parallel_lanes_never_claim_the_same_row(tmp_db):
+    import asyncio
+
+    for i in range(2):
+        _row(tmp_db, event_id=f"p{i}", timestamp=f"2026-11-14T12:0{i}:00+01:00")
+    conn = sqlite3.connect(tmp_db)
+    conn.execute("UPDATE transcriptions SET status='pending'")
+    conn.commit()
+    conn.close()
+    claims = await asyncio.gather(*(wk._claim_next_pending() for _ in range(3)))
+    ids = [c["id"] for c in claims if c]
+    assert len(ids) == 2 and len(set(ids)) == 2
+    assert claims.count(None) == 1
+
+
+def test_worker_count_is_clamped(tmp_db):
+    from app.database import save_setting
+
+    save_setting("transcription_workers", "99")
+    assert wk._worker_count() == wk._MAX_WORKERS
+    save_setting("transcription_workers", "nope")
+    assert wk._worker_count() == 1

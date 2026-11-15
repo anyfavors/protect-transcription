@@ -412,10 +412,26 @@ async def _claim_next_pending() -> dict | None:
         conn.close()
 
 
-async def transcription_worker() -> None:
-    """Infinite loop: atomically claim one pending row and process it."""
+# Upper bound for the transcription_workers setting (lanes are started once).
+_MAX_WORKERS = 8
+
+
+def _worker_count() -> int:
+    try:
+        return max(1, min(_MAX_WORKERS, int(get_settings().get("transcription_workers", "3"))))
+    except ValueError:
+        return 1
+
+
+async def _transcription_lane(lane: int) -> None:
+    """One worker loop. Lanes above the transcription_workers setting stay idle,
+    so the setting can be changed live. Claiming is atomic (BEGIN IMMEDIATE),
+    so lanes never pick the same row."""
     while True:
         try:
+            if lane >= _worker_count():
+                await asyncio.sleep(15)
+                continue
             row = await _claim_next_pending()
             if row:
                 await process_pending_transcription(row)
@@ -428,9 +444,14 @@ async def transcription_worker() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("Error in transcription worker: %s", exc)
+            logger.exception("Error in transcription worker %d: %s", lane, exc)
             inc("worker_loop_errors_total")
             await asyncio.sleep(10)
+
+
+async def transcription_worker() -> None:
+    """Run up to _MAX_WORKERS lanes; the transcription_workers setting decides how many work."""
+    await asyncio.gather(*(_transcription_lane(i) for i in range(_MAX_WORKERS)))
 
 
 def _count_pending() -> int:

@@ -118,6 +118,11 @@
                     <p class="setting-help">Voice activity detection cuts silent stretches before recognition. It is faster and prevents most invented text, so leave it on.</p></div>
                 <label class="inline-flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" class="accent-teal-600" :checked="settings.vad_filter === 'true'" @change="toggle('vad_filter')"> On</label>
             </div>
+            <div class="setting">
+                <div><p class="setting-title">Clips in parallel</p>
+                    <p class="setting-help">How many clips are transcribed at the same time (1–8). More only helps when the speech servers have spare capacity; watch the speed on the Status tab after changing it.</p></div>
+                <input type="number" min="1" max="8" class="field w-20" x-model="settings.transcription_workers">
+            </div>
         </div>
         {% include "partials/save_bar.html" %}
     </div>

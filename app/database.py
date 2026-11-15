@@ -33,6 +33,8 @@ _DEFAULT_SETTINGS: dict[str, str] = {
     "min_audio_energy": "0.005",
     # Audio compression: compress WAV to Opus/OGG after N days (0 = disabled)
     "audio_compression_days": "7",
+    # Clips transcribed in parallel (1-8). Pair with enough speech-server capacity.
+    "transcription_workers": "3",
     # Periodic background tasks
     "auto_sync_hours": "24",
     "auto_sync_interval_minutes": "60",

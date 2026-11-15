@@ -35,6 +35,7 @@ _ALLOWED_KEYS = {
     "auto_sync_interval_minutes",
     "auto_summary_time",
     "processing_timeout_minutes",
+    "transcription_workers",
     "protect_verify_ssl",
 }
 
@@ -50,6 +51,7 @@ _INT_BOUNDS = {
     "auto_sync_hours": (1, 720),
     "auto_sync_interval_minutes": (5, 1440),
     "processing_timeout_minutes": (1, 1440),
+    "transcription_workers": (1, 8),
 }
 
 # Settings that should never appear in the GET response (defence in depth —
