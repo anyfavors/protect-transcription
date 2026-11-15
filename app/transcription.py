@@ -116,8 +116,12 @@ async def fetch_audio_clip(
         return None
 
 
-async def _extract_audio(video_data: bytes) -> bytes | None:
-    """Run ffmpeg to extract 16 kHz mono WAV from raw video bytes (non-blocking)."""
+async def _extract_audio(video_data: bytes, clean: bool = True) -> bytes | None:
+    """Run ffmpeg to extract 16 kHz mono WAV from raw video bytes (non-blocking).
+
+    clean=False skips the highpass/loudnorm filters: used for re-decoding our own
+    cached OGG files, which already had them applied (and loudnorm is the slow part).
+    """
     # Create a placeholder file FIRST so cleanup is guaranteed even if write fails.
     tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)  # noqa: SIM115 — manual close below
     video_path = Path(tmp.name)
@@ -145,8 +149,7 @@ async def _extract_audio(video_data: bytes) -> bytes | None:
             "16000",
             "-ac",
             "1",
-            "-af",
-            "highpass=f=200,loudnorm",
+            *(["-af", "highpass=f=200,loudnorm"] if clean else []),
             str(audio_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

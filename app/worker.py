@@ -207,7 +207,7 @@ async def process_pending_transcription(row: dict) -> None:
         audio_filename = existing_audio_file
         if not audio_data.startswith(b"RIFF"):
             # Older clips are compressed to Opus/OGG; decode back to 16 kHz WAV.
-            audio_data = await _extract_audio(audio_data)
+            audio_data = await _extract_audio(audio_data, clean=False)
             if not audio_data:
                 _retry_or_fail(
                     record_id, attempts, "Failed to decode cached audio", existing_audio_file
