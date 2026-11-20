@@ -15,6 +15,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 
+from app import worker
 from app.auth import require_api_token
 from app.config import AUDIO_PATH, LOCAL_TZ
 from app.database import audit, get_connection
@@ -385,6 +386,7 @@ async def get_stats():
         "today": today,
         "rate_per_hour": rate_per_hour,
         "eta_seconds": round(queued / rate_per_hour * 3600) if queued and rate_per_hour else None,
+        "summaries": dict(worker.rollup_progress),
     }
 
 

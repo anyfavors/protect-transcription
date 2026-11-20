@@ -11,14 +11,6 @@
         Built automatically: when transcripts change, the day is rebuilt, then its week, month and year. Today’s, this week’s, this month’s and this year’s summaries refresh once a night.
     </p>
 
-    <div x-show="progress.period" x-cloak class="card p-3 flex flex-col gap-2" role="status">
-        <div class="flex items-center gap-2 text-sm">
-            <span class="animate-spin text-teal-600" x-html="$icon('refresh-cw')"></span>
-            <span x-text="progressText"></span>
-        </div>
-        <div class="h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden"><div class="h-full bg-teal-500 rounded-full transition-all" :style="'width:' + progressPct + '%'"></div></div>
-    </div>
-
     <div x-show="loading" class="text-sm text-slate-500 py-10 text-center">Loading…</div>
 
     <div x-show="!loading" class="grid gap-5 lg:grid-cols-[20rem_1fr] items-start">

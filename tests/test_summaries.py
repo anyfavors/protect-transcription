@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import sqlite3
@@ -160,3 +161,39 @@ def test_unknown_camera_names_backfilled(tmp_db):
     names = dict(conn.execute("SELECT event_id, camera_name FROM transcriptions").fetchall())
     conn.close()
     assert names == {"a": "Indgang", "b": "Indgang", "c": "Unknown (MAC2)"}
+
+
+async def test_summary_worker_waits_for_quiet_queue_and_says_so(tmp_db, monkeypatch):
+    from app import worker as wk
+
+    _insert(tmp_db, "2025-10-01T10:00:00+02:00", "noget der skete")
+    conn = sqlite3.connect(tmp_db)
+    # A clip finished just now: summaries must wait, and the wait is visible.
+    conn.execute("UPDATE transcriptions SET processed_at=strftime('%Y-%m-%dT%H:%M:%S','now')")
+    conn.commit()
+
+    async def stop(_delay):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(wk.asyncio, "sleep", stop)
+    ran = []
+
+    async def fake_rollups(include_current=True):
+        ran.append(include_current)
+        return 0, 0
+
+    monkeypatch.setattr(wk, "run_rollups", fake_rollups)
+    with pytest.raises(asyncio.CancelledError):
+        await wk.auto_summary_worker()
+    assert ran == []
+    assert wk.rollup_progress["pending"] == 4  # day, week, month, year
+    assert "waiting_until" in wk.rollup_progress
+
+    # Last clip finished long ago (e.g. before a restart): no waiting.
+    conn.execute("UPDATE transcriptions SET processed_at='2025-10-01T08:00:00'")
+    conn.commit()
+    conn.close()
+    with pytest.raises(asyncio.CancelledError):
+        await wk.auto_summary_worker()
+    assert len(ran) == 1  # include_current depends on the clock (nightly run)
+    wk.rollup_progress.clear()

@@ -15,12 +15,14 @@ export default function summariesPage() {
         loading: false,
         month: today().slice(0, 7),   // calendar month shown on the Days tab
         _loadedFor: null,
-        progress: {},   // automatic rebuild in progress ({} when idle)
 
         init() {
             this.$watch('$store.ui.route', () => this.sync());
             this.sync();
-            setInterval(() => this.pollProgress(), 15000);
+            // Refresh the list each time the automatic rebuild moves on to the next summary.
+            this.$watch('$store.ui.stats.summaries', (p, old) => {
+                if (this.active && this._loadedFor === this.period && (p?.key !== old?.key || p?.period !== old?.period)) this.load(true);
+            });
         },
         get active() { return this.$store.ui.route.page === 'summaries'; },
         get period() {
@@ -33,7 +35,6 @@ export default function summariesPage() {
         sync() {
             if (!this.active) return;
             if (this._loadedFor !== this.period) this.load();
-            this.pollProgress();
             const key = this.$store.ui.route.parts[1];
             if (this.period === 'daily' && key) this.month = key.slice(0, 7);
         },
@@ -52,25 +53,6 @@ export default function summariesPage() {
                 this.loading = false;
             }
         },
-        // While the rebuild runs, refresh the list each time it moves on to the next summary.
-        async pollProgress() {
-            if (!this.active || document.hidden) return;
-            let next;
-            try { next = await api.get('/api/summaries/progress'); } catch { return; }
-            const moved = next.key !== this.progress.key || next.period !== this.progress.period;
-            this.progress = next;
-            if (moved && this._loadedFor === this.period) this.load(true);
-        },
-        get progressText() {
-            const p = this.progress;
-            if (!p.period) return '';
-            const name = PERIODS.find(x => x.id === p.period)?.label.toLowerCase() || p.period;
-            let t = `Rebuilding ${name}: ${number(p.done)} of ${number(p.total)} done · now ${periodLabel(p.period, p.key)}`;
-            if (p.failed) t += ` · ${number(p.failed)} failed, retried next pass`;
-            return t;
-        },
-        get progressPct() { return this.progress.total ? Math.round(this.progress.done / this.progress.total * 100) : 0; },
-
         select(key) { this.$store.ui.go('summaries', [this.period, key]); },
         setPeriod(p) { this.$store.ui.go('summaries', [p]); },
 

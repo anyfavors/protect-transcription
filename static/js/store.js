@@ -33,7 +33,8 @@ export function createStore() {
             this.refreshStats();
             this.refreshHealth();
             setInterval(() => this.refreshHealth(), 60000);
-            setInterval(() => { if (!this.wsOnline) this.refreshStats(); }, 15000);
+            // The WebSocket only reports clips; summary progress needs polling while it's active.
+            setInterval(() => { if (!this.wsOnline || Object.keys(this.stats.summaries || {}).length) this.refreshStats(); }, 15000);
             api.get('/api/me').then(me => { this.me = me; }).catch(() => {});
             api.get('/api/cameras').then(d => { this.cameras = d.cameras; }).catch(() => {});
             this.connect();
@@ -79,6 +80,21 @@ export function createStore() {
         },
         async refreshHealth() {
             try { this.health = await api.get('/api/system/health'); } catch { this.health = null; }
+        },
+        get summaryProgress() {
+            const p = this.stats.summaries || {};
+            return p.total ? Math.round((p.done / p.total) * 100) : 0;
+        },
+        get summaryText() {
+            const p = this.stats.summaries || {};
+            const names = { daily: 'days', weekly: 'weeks', monthly: 'months', yearly: 'years' };
+            const n = (x) => Number(x).toLocaleString('en-GB');
+            if (p.period) return `Summarising ${names[p.period]}: ${n(p.done)} of ${n(p.total)}${p.failed ? ` · ${n(p.failed)} failed, retried later` : ''}`;
+            if (p.waiting_until) {
+                const at = new Date(p.waiting_until).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+                return `${n(p.pending)} summaries out of date · updating from ${at}`;
+            }
+            return '';
         },
         get queueProgress() {
             const s = this.stats;

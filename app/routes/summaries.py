@@ -21,12 +21,6 @@ async def get_summaries(period: str = Query("daily"), limit: int = Query(60, ge=
     return data
 
 
-@router.get("/api/summaries/progress")
-async def summaries_progress():
-    """The automatic rebuild currently running, or {} when idle."""
-    return dict(worker.rollup_progress)
-
-
 @router.post("/api/summaries/generate", dependencies=[Depends(require_api_token)])
 async def generate_summary(request: Request):
     data = await request.json()

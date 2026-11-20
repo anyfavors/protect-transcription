@@ -81,7 +81,14 @@
                     <span class="block h-full bg-teal-500 transition-all" :style="'width:' + $store.ui.queueProgress + '%'"></span>
                 </span>
             </a>
-            <span x-show="$store.ui.stats.queued + $store.ui.stats.processing === 0" class="flex-1 text-right sm:text-left">All clips transcribed</span>
+            <a href="#/summaries" x-show="$store.ui.stats.queued + $store.ui.stats.processing === 0 && $store.ui.summaryText"
+               class="flex items-center gap-3 flex-1 min-w-0 justify-end sm:justify-start">
+                <span class="truncate" x-text="'All clips transcribed · ' + $store.ui.summaryText"></span>
+                <span x-show="$store.ui.stats.summaries?.period" class="hidden sm:block flex-1 max-w-64 h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                    <span class="block h-full bg-teal-500 transition-all" :style="'width:' + $store.ui.summaryProgress + '%'"></span>
+                </span>
+            </a>
+            <span x-show="$store.ui.stats.queued + $store.ui.stats.processing === 0 && !$store.ui.summaryText" class="flex-1 text-right sm:text-left">All clips transcribed</span>
         </div>
 
         <div class="flex-1 min-h-0 lg:flex">

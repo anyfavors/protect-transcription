@@ -652,11 +652,33 @@ async def _generate_summary_safe(period: str, key: str) -> bool:
         return False
 
 
-# What the rollup pass is doing right now (empty when idle); shown on the Summaries page.
+# What the summary rollup is doing, shown in the status strip ({} when idle):
+#   waiting: {"waiting_until": iso, "pending": n}
+#   running: {"period", "key", "done", "total", "failed"}
 rollup_progress: dict = {}
 
 
-async def run_rollups(include_current: bool = True) -> int:
+def _stale_keys(period: str, include_current: bool, current: dict[str, str]) -> list[str]:
+    """Missing or out-of-date summaries of one level, oldest first."""
+    from app.summaries import get_summaries
+
+    items = get_summaries(period, limit=None)["items"]
+    return [
+        item["period_key"]
+        for item in reversed(items)
+        if (include_current or item["period_key"] != current[period])
+        and (not item.get("summary") or item.get("stale"))
+    ]
+
+
+def _count_stale() -> int:
+    from app.summaries import PERIODS, current_keys
+
+    current = current_keys()
+    return sum(len(_stale_keys(p, False, current)) for p in PERIODS)
+
+
+async def run_rollups(include_current: bool = True) -> tuple[int, int]:
     """
     Regenerate every summary that is missing or whose inputs changed.
 
@@ -665,25 +687,21 @@ async def run_rollups(include_current: bool = True) -> int:
     makes its week/month stale in the same pass, and so on up to the year.
     Periods containing "now" are only touched when *include_current* is set
     (the nightly run), so the running day/week/month/year isn't rebuilt
-    after every new clip.
+    after every new clip. Returns (generated, failed).
     """
-    from app.summaries import PERIODS, current_keys, get_summaries
+    from app.summaries import PERIODS, current_keys
 
     current = current_keys()
-    generated = 0
+    generated = failed = 0
     try:
         for period in PERIODS:
             try:
-                items = get_summaries(period, limit=None)["items"]
+                # Staleness hashes every transcript: seconds of work, keep it off the event loop.
+                todo = await asyncio.to_thread(_stale_keys, period, include_current, current)
             except Exception as exc:
                 logger.warning("Rollup: failed to read %s summaries: %s", period, exc)
                 continue
-            todo = [
-                item["period_key"]
-                for item in reversed(items)  # oldest first
-                if (include_current or item["period_key"] != current[period])
-                and (not item.get("summary") or item.get("stale"))
-            ]
+            rollup_progress.clear()
             rollup_progress.update(period=period, done=0, total=len(todo), failed=0)
             for key in todo:
                 rollup_progress["key"] = key
@@ -691,11 +709,12 @@ async def run_rollups(include_current: bool = True) -> int:
                 if await _generate_summary_safe(period, key):
                     generated += 1
                 else:
+                    failed += 1
                     rollup_progress["failed"] += 1
                 rollup_progress["done"] += 1
     finally:
         rollup_progress.clear()
-    return generated
+    return generated, failed
 
 
 def _queue_busy() -> bool:
@@ -710,9 +729,19 @@ def _queue_busy() -> bool:
         conn.close()
 
 
-_ROLLUP_CHECK_SECONDS = 300
-# Wait until the transcription queue has been empty this long before
-# summarising, so a mass re-transcription settles before anything is rebuilt.
+def _last_processed() -> str | None:
+    """UTC stamp of the most recently finished clip (survives restarts, unlike a timer)."""
+    conn = _open_conn()
+    try:
+        return conn.execute("SELECT MAX(processed_at) FROM transcriptions").fetchone()[0]
+    finally:
+        conn.close()
+
+
+_ROLLUP_CHECK_SECONDS = 60
+_ROLLUP_FAILED_BACKOFF = 600  # after a pass with failures (Ollama down/slow), wait before retrying
+# Wait until no clip has finished for this long before summarising, so a mass
+# re-transcription settles before anything is rebuilt.
 _ROLLUP_QUIET = timedelta(minutes=30)
 
 
@@ -720,10 +749,10 @@ async def auto_summary_worker() -> None:
     """
     Keep summaries in sync with transcriptions.
 
-    Every few minutes: if the transcription queue has been idle for
-    _ROLLUP_QUIET, regenerate summaries whose source content changed (closed
-    periods). Once a day after ``auto_summary_time`` the current periods are
-    included too. Nothing is regenerated unless its inputs actually changed.
+    Once the queue is empty and no clip has finished for _ROLLUP_QUIET,
+    regenerate summaries whose source content changed (closed periods). Once
+    a day after ``auto_summary_time`` the current periods are included too.
+    Nothing is regenerated unless its inputs actually changed.
     """
     from app.summaries import backfill_source_hashes
 
@@ -732,26 +761,46 @@ async def auto_summary_worker() -> None:
     except Exception as exc:
         logger.exception("Summary hash backfill failed: %s", exc)
 
-    quiet_since: datetime | None = None
     last_nightly = None
+    counted_for: str | None = None  # last_processed value the waiting count belongs to
     while True:
         try:
-            await asyncio.sleep(_ROLLUP_CHECK_SECONDS)
+            delay = _ROLLUP_CHECK_SECONDS
             now = datetime.now(tz=LOCAL_TZ)
+            last = _last_processed()
+            quiet_at = (
+                datetime.fromisoformat(last).replace(tzinfo=UTC) + _ROLLUP_QUIET if last else None
+            )
             if _queue_busy():
-                quiet_since = None
-                continue
-            quiet_since = quiet_since or now
-            if now - quiet_since < _ROLLUP_QUIET:
-                continue
-
-            target = _parse_hhmm(get_settings().get("auto_summary_time", "23:55"), time(23, 55))
-            nightly = now.time() >= target and last_nightly != now.date()
-            count = await run_rollups(include_current=nightly)
-            if nightly:
-                last_nightly = now.date()
-            if count:
-                logger.info("Rollup pass generated %d summaries (nightly=%s)", count, nightly)
+                rollup_progress.clear()  # the strip shows the transcription queue instead
+                counted_for = None
+            elif quiet_at and now < quiet_at:
+                if last != counted_for:
+                    counted_for = last
+                    pending = await asyncio.to_thread(_count_stale)
+                    rollup_progress.clear()
+                    if pending:
+                        rollup_progress.update(
+                            waiting_until=quiet_at.astimezone(LOCAL_TZ).isoformat(),
+                            pending=pending,
+                        )
+            else:
+                counted_for = None
+                target = _parse_hhmm(get_settings().get("auto_summary_time", "23:55"), time(23, 55))
+                nightly = now.time() >= target and last_nightly != now.date()
+                generated, failed = await run_rollups(include_current=nightly)
+                if nightly:
+                    last_nightly = now.date()
+                if generated or failed:
+                    logger.info(
+                        "Rollup pass: %d generated, %d failed (nightly=%s)",
+                        generated,
+                        failed,
+                        nightly,
+                    )
+                if failed:
+                    delay = _ROLLUP_FAILED_BACKOFF
+            await asyncio.sleep(delay)
 
         except asyncio.CancelledError:
             raise
