@@ -10,6 +10,7 @@
 
     <!-- ───────── Status ───────── -->
     <div x-show="tab === 'status'" class="flex flex-col gap-4">
+        <p class="text-sm text-slate-500 dark:text-slate-400">Talky version <span class="font-medium text-slate-700 dark:text-slate-200 tabular-nums">{{ version }}</span></p>
         <div class="grid sm:grid-cols-3 gap-3">
             <template x-for="svc in services" :key="svc.id">
                 <div class="card p-4 flex flex-col gap-1">

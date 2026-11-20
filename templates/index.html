@@ -36,6 +36,7 @@
         <a href="#/day" class="flex items-center gap-2.5 px-2 pb-5">
             <span class="w-8 h-8 rounded-lg bg-teal-600 text-white grid place-items-center" x-html="$icon('mic','w-4 h-4')"></span>
             <span class="font-semibold tracking-tight">Talky</span>
+            <span class="text-xs text-slate-400 tabular-nums">v{{ version }}</span>
         </a>
         {% for page, label, ico in [('day','Day','calendar-days'),('summaries','Summaries','file-text'),('search','Search & ask','search'),('insights','Insights','chart-column'),('system','System','settings')] %}
         <a href="#/{{ page }}" class="nav-link" :class="$store.ui.route.page === '{{ page }}' && 'nav-active'"

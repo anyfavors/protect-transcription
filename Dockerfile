@@ -76,5 +76,9 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:8080/livez || exit 1
 
+# Last, so a new version only changes this tiny layer.
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
+
 # app package exposes the FastAPI instance as app:app
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -7,6 +7,9 @@ import logging
 import os
 from zoneinfo import ZoneInfo
 
+# Release version, baked into the image by CI (docker build-arg).
+APP_VERSION: str = os.getenv("APP_VERSION", "dev")
+
 PROTECT_HOST: str = os.getenv("PROTECT_HOST", "argos.local")
 PROTECT_PORT: int = int(os.getenv("PROTECT_PORT", "443"))
 PROTECT_USERNAME: str = os.getenv("PROTECT_USERNAME", "")

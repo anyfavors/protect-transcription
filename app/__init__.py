@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.auth import auth_enabled, webhook_auth_enabled
-from app.config import AUDIO_PATH
+from app.config import APP_VERSION, AUDIO_PATH
 from app.database import init_database, reset_stuck_processing
 from app.http_clients import close_clients
 from app.logging_config import configure_logging
@@ -201,5 +201,8 @@ for _router in (
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse(
-        request, "index.html", {"assets": ASSET_PREFIX}, headers={"Cache-Control": "no-cache"}
+        request,
+        "index.html",
+        {"assets": ASSET_PREFIX, "version": APP_VERSION},
+        headers={"Cache-Control": "no-cache"},
     )
