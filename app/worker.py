@@ -730,10 +730,20 @@ def _queue_busy() -> bool:
 
 
 def _last_processed() -> str | None:
-    """UTC stamp of the most recently finished clip (survives restarts, unlike a timer)."""
+    """
+    UTC stamp of the most recently finished clip from before today.
+
+    Read from the DB so it survives restarts. Today's live clips are left out:
+    they only affect the current periods (nightly run) and arrive all day, so
+    they would otherwise keep postponing the rebuild of everything else.
+    """
+    today = datetime.now(tz=LOCAL_TZ).date().isoformat()
     conn = _open_conn()
     try:
-        return conn.execute("SELECT MAX(processed_at) FROM transcriptions").fetchone()[0]
+        return conn.execute(
+            "SELECT MAX(processed_at) FROM transcriptions WHERE substr(timestamp, 1, 10) < ?",
+            (today,),
+        ).fetchone()[0]
     finally:
         conn.close()
 

@@ -196,4 +196,19 @@ async def test_summary_worker_waits_for_quiet_queue_and_says_so(tmp_db, monkeypa
     with pytest.raises(asyncio.CancelledError):
         await wk.auto_summary_worker()
     assert len(ran) == 1  # include_current depends on the clock (nightly run)
+
+    # A live clip from today finishing now does not postpone the rebuild.
+    ran.clear()
+    today = wk.datetime.now(tz=wk.LOCAL_TZ).strftime("%Y-%m-%dT%H:%M:%S+01:00")
+    _insert(tmp_db, today, "lige nu")
+    conn = sqlite3.connect(tmp_db)
+    conn.execute(
+        "UPDATE transcriptions SET processed_at=strftime('%Y-%m-%dT%H:%M:%S','now')"
+        " WHERE transcription='lige nu'"
+    )
+    conn.commit()
+    conn.close()
+    with pytest.raises(asyncio.CancelledError):
+        await wk.auto_summary_worker()
+    assert len(ran) == 1
     wk.rollup_progress.clear()

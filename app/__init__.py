@@ -47,6 +47,16 @@ from app.worker import (
 
 logger = logging.getLogger(__name__)
 
+
+class _RevalidatedStatic(StaticFiles):
+    """Browsers must revalidate (cheap 304 via ETag) so a deploy's new JS/CSS is picked up."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 _STATIC_DIR = Path(__file__).parent.parent / "static"
 _TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 
@@ -138,7 +148,7 @@ app.add_middleware(RequestIdMiddleware)
 # Static files (JS, CSS assets). The web app manifest needs its own MIME type.
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 if _STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+    app.mount("/static", _RevalidatedStatic(directory=str(_STATIC_DIR)), name="static")
 
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
