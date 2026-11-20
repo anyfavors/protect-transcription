@@ -652,6 +652,10 @@ async def _generate_summary_safe(period: str, key: str) -> bool:
         return False
 
 
+# What the rollup pass is doing right now (empty when idle); shown on the Summaries page.
+rollup_progress: dict = {}
+
+
 async def run_rollups(include_current: bool = True) -> int:
     """
     Regenerate every summary that is missing or whose inputs changed.
@@ -667,21 +671,30 @@ async def run_rollups(include_current: bool = True) -> int:
 
     current = current_keys()
     generated = 0
-    for period in PERIODS:
-        try:
-            items = get_summaries(period, limit=None)["items"]
-        except Exception as exc:
-            logger.warning("Rollup: failed to read %s summaries: %s", period, exc)
-            continue
-        for item in reversed(items):  # oldest first
-            key = item["period_key"]
-            if key == current[period] and not include_current:
+    try:
+        for period in PERIODS:
+            try:
+                items = get_summaries(period, limit=None)["items"]
+            except Exception as exc:
+                logger.warning("Rollup: failed to read %s summaries: %s", period, exc)
                 continue
-            if item.get("summary") and not item.get("stale"):
-                continue
-            logger.info("Rollup: generating %s summary for %s", period, key)
-            if await _generate_summary_safe(period, key):
-                generated += 1
+            todo = [
+                item["period_key"]
+                for item in reversed(items)  # oldest first
+                if (include_current or item["period_key"] != current[period])
+                and (not item.get("summary") or item.get("stale"))
+            ]
+            rollup_progress.update(period=period, done=0, total=len(todo), failed=0)
+            for key in todo:
+                rollup_progress["key"] = key
+                logger.info("Rollup: generating %s summary for %s", period, key)
+                if await _generate_summary_safe(period, key):
+                    generated += 1
+                else:
+                    rollup_progress["failed"] += 1
+                rollup_progress["done"] += 1
+    finally:
+        rollup_progress.clear()
     return generated
 
 

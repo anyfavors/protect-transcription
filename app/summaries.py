@@ -227,7 +227,8 @@ async def _ollama(system: str, user: str) -> str:
                 "stream": False,
                 "options": {"num_ctx": _NUM_CTX},
             },
-            timeout=300.0,
+            # Slow is fine here; a busy shared GPU can take several minutes per chunk.
+            timeout=900.0,
         )
     except Exception as exc:
         logger.exception("Error calling Ollama: %s", exc)

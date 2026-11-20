@@ -99,8 +99,11 @@ async def test_run_rollups_refreshes_current_and_fills_missing(tmp_db, monkeypat
     )
     called = []
 
+    seen = []
+
     async def fake_gen(period: str, key: str) -> bool:
         called.append((period, key))
+        seen.append(dict(wk.rollup_progress))
         return True
 
     monkeypatch.setattr(wk, "_generate_summary_safe", fake_gen)
@@ -111,6 +114,8 @@ async def test_run_rollups_refreshes_current_and_fills_missing(tmp_db, monkeypat
         ("monthly", "2026-11"),
         ("yearly", "2026"),
     ]
+    assert seen[0] == {"period": "daily", "key": "2026-11-13", "done": 0, "total": 1, "failed": 0}
+    assert wk.rollup_progress == {}  # cleared when the pass ends
     called.clear()
     await wk.run_rollups(include_current=False)  # current periods wait for the nightly run
     assert called == [("daily", "2026-11-13")]
