@@ -7,6 +7,7 @@ FastAPI application factory.  Import ``app`` to get the ASGI app instance.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import mimetypes
 from contextlib import asynccontextmanager
@@ -48,13 +49,27 @@ from app.worker import (
 logger = logging.getLogger(__name__)
 
 
-class _RevalidatedStatic(StaticFiles):
-    """Browsers must revalidate (cheap 304 via ETag) so a deploy's new JS/CSS is picked up."""
+class _CachedStatic(StaticFiles):
+    """StaticFiles with a fixed Cache-Control header."""
+
+    def __init__(self, *, cache_control: str, **kwargs):
+        super().__init__(**kwargs)
+        self.cache_control = cache_control
 
     def file_response(self, *args, **kwargs):
         response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = "no-cache"
+        response.headers["Cache-Control"] = self.cache_control
         return response
+
+
+def _asset_version(static_dir: Path) -> str:
+    """Content hash of static/: changes exactly when a deploy changes a file."""
+    digest = hashlib.sha1(usedforsecurity=False)
+    for f in sorted(static_dir.rglob("*")):
+        if f.is_file():
+            digest.update(f.relative_to(static_dir).as_posix().encode())
+            digest.update(f.read_bytes())
+    return digest.hexdigest()[:12]
 
 
 _STATIC_DIR = Path(__file__).parent.parent / "static"
@@ -147,8 +162,23 @@ app.add_middleware(RequestIdMiddleware)
 
 # Static files (JS, CSS assets). The web app manifest needs its own MIME type.
 mimetypes.add_type("application/manifest+json", ".webmanifest")
+# JS/CSS are loaded from a versioned path (index.html uses {{ assets }}), so a
+# deploy changes the URL and no browser or proxy can serve stale code; those
+# can then be cached forever. Plain /static (manifest, icons) is revalidated.
+ASSET_PREFIX = "/static/v/" + (_asset_version(_STATIC_DIR) if _STATIC_DIR.exists() else "0")
 if _STATIC_DIR.exists():
-    app.mount("/static", _RevalidatedStatic(directory=str(_STATIC_DIR)), name="static")
+    app.mount(
+        ASSET_PREFIX,
+        _CachedStatic(
+            directory=str(_STATIC_DIR), cache_control="public, max-age=31536000, immutable"
+        ),
+        name="assets",
+    )
+    app.mount(
+        "/static",
+        _CachedStatic(directory=str(_STATIC_DIR), cache_control="no-cache"),
+        name="static",
+    )
 
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
@@ -170,4 +200,6 @@ for _router in (
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse(request, "index.html")
+    return templates.TemplateResponse(
+        request, "index.html", {"assets": ASSET_PREFIX}, headers={"Cache-Control": "no-cache"}
+    )
